@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0E1117">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="BossPlay">
+<title>BossPlay</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <header id="top">
+    <button id="back" class="icon" aria-label="Retour" hidden>‹</button>
+    <div class="brand"><span class="logo">▶</span><span>BossPlay</span></div>
+    <input id="search" type="search" placeholder="Rechercher" autocomplete="off">
+    <button id="theme" class="icon" aria-label="Thème jour/nuit">◐</button>
+  </header>
+  <div id="banner" hidden></div>
+  <nav id="tabs">
+    <button data-tab="albums" class="on">Albums</button>
+    <button data-tab="artists">Artistes</button>
+    <button data-tab="songs">Chansons</button>
+    <button data-tab="favs">Favoris</button>
+    <button data-tab="playlists">Playlists</button>
+    <button data-tab="settings">Réglages</button>
+  </nav>
+  <main id="view"></main>
+  <div id="mini" hidden>
+    <div class="bar"><div class="fill"></div></div>
+    <div class="row">
+      <div class="art"></div>
+      <div class="meta"><div class="t"></div><div class="s"></div></div>
+      <button class="icon prev" aria-label="Précédent">⏮</button>
+      <button class="icon play big" aria-label="Lecture">▶</button>
+      <button class="icon next" aria-label="Suivant">⏭</button>
+    </div>
+  </div>
+</div>
+
+<section id="full" hidden>
+  <div class="bg"></div>
+  <button class="icon close" aria-label="Fermer">⌄</button>
+  <div class="wrap">
+    <div class="left"><div class="cover"></div><div class="lyrics" hidden></div></div>
+    <div class="right">
+      <div class="title"></div>
+      <div class="artist link"></div>
+      <div class="album link"></div>
+      <input class="seek" type="range" min="0" max="1000" value="0">
+      <div class="times"><span class="cur">0:00</span><span class="dur">0:00</span></div>
+      <div class="controls">
+        <button class="icon shuffle" aria-label="Aléatoire">🔀</button>
+        <button class="icon prev" aria-label="Précédent">⏮</button>
+        <button class="icon play huge" aria-label="Lecture">▶</button>
+        <button class="icon next" aria-label="Suivant">⏭</button>
+        <button class="icon repeat" aria-label="Répéter">🔁</button>
+      </div>
+      <div class="actions">
+        <button class="pill lyr">Paroles</button>
+        <button class="pill clip">🎬 Clip</button>
+        <button class="pill fav">♡ Favori</button>
+        <button class="pill more">⋯</button>
+      </div>
+      <div class="err"></div>
+    </div>
+  </div>
+</section>
+
+<section id="clip" hidden>
+  <div class="stage">
+    <div class="side" hidden></div>
+    <div class="video"><div id="yt"></div><div class="nov" hidden></div><div class="subs" hidden></div></div>
+  </div>
+  <button class="icon close" aria-label="Quitter le clip">✕</button>
+  <div class="cbar">
+    <input class="seek" type="range" min="0" max="1000" value="0">
+    <div class="crow">
+      <div class="info"><div class="t"></div><div class="s"></div></div>
+      <button class="icon prev">⏮</button>
+      <button class="icon play big">⏸</button>
+      <button class="icon next">⏭</button>
+      <div class="tools">
+        <button class="pill off minus">−0,5 s</button>
+        <button class="pill off plus">+0,5 s</button>
+        <button class="pill lmode">Sous-titres</button>
+        <button class="pill src">Source ▾</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div id="sheet" hidden><div class="panel"></div></div>
+<div id="toast" hidden></div>
+<input id="files" type="file" accept="audio/*" multiple hidden>
+
+<script src="app.js"></script>
+</body>
+</html>
