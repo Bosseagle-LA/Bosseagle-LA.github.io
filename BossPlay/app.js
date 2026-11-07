@@ -2,7 +2,7 @@
    Paroles : LRCLIB. Clips : YouTube (lecteur officiel intégré, ou l'appli YouTube / YouTube Music). */
 'use strict';
 
-const VERSION = '1.0';
+const VERSION = '1.1';
 const YT_KEY = 'AIzaSyDoAxJzDHTkIPDqZbVcLr2Aguu40kPZqio';            // clé « BossPlayPWA » (limitée à bosseagle-la.github.io)
 const SCOPE = 'https://www.googleapis.com/auth/drive.readonly';
 const DEFAULT_CLIENT = '660248878537-3pvnlm8fkk4r9heemoa4p7aq5am0h8gg.apps.googleusercontent.com';   // ID client OAuth « BossPlay PWA »
@@ -807,7 +807,7 @@ function ytCmd(f, ...a) { try { clip.yt && clip.yt[f] && clip.yt[f](...a); } cat
 async function openClip() {
   const t = cur(); if (!t) return;
   if (S.clipPlayer === 'youtube' || S.clipPlayer === 'music') { const i = await resolveClip(t); return openExternal(S.clipPlayer, t, i?.chosen); }
-  clip.on = true; $('#clip').hidden = false; clipLayout(); wakeBar();
+  clip.on = true; clip.entry = t.id; $('#clip').hidden = false; clipLayout(); wakeBar();
   if (!(await ytApi())) { clip.msg = 'Impossible de charger le lecteur YouTube (réseau ?).'; clipTrackChanged(); return; }
   if (!clip.yt) {
     clip.yt = new YT.Player('yt', {
@@ -834,8 +834,13 @@ async function openClip() {
 function closeClip() {
   if (!clip.on) return;
   const wasPlaying = clip.has && clip.playing;
+  const at = (clip.time + (clipCache[cur()?.id]?.offset || 0)) / 1000;
   clip.on = false; $('#clip').hidden = true; ytCmd('stopVideo'); clip.has = false;
-  if (wasPlaying) audio.play().catch(() => { });
+  if (wasPlaying) {
+    // La musique reprend là où en était le clip.
+    if (at > 0 && (!audio.duration || at < audio.duration - 2)) audio.currentTime = at;
+    audio.play().catch(() => { });
+  }
 }
 async function clipTrackChanged() {
   const t = cur(); if (!t || !clip.on) return;
@@ -846,10 +851,13 @@ async function clipTrackChanged() {
   if (cur() !== t || !clip.on) return;
   if (info?.chosen && clip.yt?.loadVideoById) {
     clip.has = true; clip.tried.add(info.chosen);
+    // Premier clip après l'ouverture : il reprend à la seconde où en était le MP3 (moins le décalage des paroles).
+    const start = clip.entry === t.id ? Math.max(0, audio.currentTime - (info.offset || 0) / 1000) : 0;
+    clip.entry = null;
     audio.pause();
     $('#clip .nov').hidden = true; $('#yt').style.visibility = 'visible';
     const f = clip.yt.getIframe && clip.yt.getIframe(); if (f) f.style.visibility = 'visible';
-    clip.yt.loadVideoById(info.chosen);
+    clip.yt.loadVideoById({ videoId: info.chosen, startSeconds: start });
   } else {
     clip.has = false; ytCmd('stopVideo');
     showNoVideo(t);
