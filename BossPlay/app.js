@@ -2,9 +2,13 @@
    Paroles : LRCLIB. Clips : YouTube (lecteur officiel intégré, ou l'appli YouTube / YouTube Music). */
 'use strict';
 
-const VERSION = '1.1';
+const VERSION = '1.3';
 const YT_KEY = 'AIzaSyDoAxJzDHTkIPDqZbVcLr2Aguu40kPZqio';            // clé « BossPlayPWA » (limitée à bosseagle-la.github.io)
-const SCOPE = 'https://www.googleapis.com/auth/drive.readonly';
+// Lecture de la musique + dossier caché de BossPlay (profil de chacun) + fichiers créés par BossPlay (index de la bibliothèque).
+const SCOPE = 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file';
+const FAMILY = ['Boss', 'Sam', 'Adam', 'Sofia'];
+const PROFILE_FILE = 'bossplay-profil.json';
+const INDEX_FILE = 'bossplay-index.json';
 const DEFAULT_CLIENT = '660248878537-3pvnlm8fkk4r9heemoa4p7aq5am0h8gg.apps.googleusercontent.com';   // ID client OAuth « BossPlay PWA »
 const AUDIO_EXT = /\.(mp3|m4a|aac|mp4|flac|wav|aif|aiff|ogg|opus)$/i;
 const MIME = { mp3: 'audio/mpeg', m4a: 'audio/mp4', aac: 'audio/aac', mp4: 'audio/mp4', flac: 'audio/flac', wav: 'audio/wav', aif: 'audio/aiff', aiff: 'audio/aiff', ogg: 'audio/ogg', opus: 'audio/ogg' };
@@ -65,9 +69,20 @@ const S = Object.assign({
 if (!S.clientId) S.clientId = DEFAULT_CLIENT;
 const saveS = () => store.set('settings', S);
 const favs = { tracks: new Set(store.get('favTracks', [])), albums: new Set(store.get('favAlbums', [])) };
-const saveFavs = () => { store.set('favTracks', [...favs.tracks]); store.set('favAlbums', [...favs.albums]); };
+// Favoris datés (synchronisation) : 't:id' / 'a:id' → +date (favori) ou −date (retiré).
+let favTs = store.get('favTs', null);
+if (!favTs) { favTs = {}; favs.tracks.forEach(id => favTs['t:' + id] = 1); favs.albums.forEach(id => favTs['a:' + id] = 1); }
+const saveFavs = () => { store.set('favTracks', [...favs.tracks]); store.set('favAlbums', [...favs.albums]); store.set('favTs', favTs); markDirty(); };
+function setFav(kind, id, on) {
+  favTs[kind + ':' + id] = on ? Date.now() : -Date.now();
+  (kind === 't' ? favs.tracks : favs.albums)[on ? 'add' : 'delete'](id);
+  saveFavs();
+}
+function toggleFav(kind, id) { setFav(kind, id, !(kind === 't' ? favs.tracks : favs.albums).has(id)); }
 let playlists = store.get('playlists', []);
-const savePl = () => store.set('playlists', playlists);
+let plDeleted = store.get('plDeleted', {});
+const savePl = (p) => { if (p) p.ts = Date.now(); store.set('playlists', playlists); store.set('plDeleted', plDeleted); markDirty(); };
+let playLog = store.get('history', []);     // écoutes : [{ id, at }]
 const offline = new Set(store.get('offline', []));      // titres gardés sur l'appareil
 const saveOff = () => store.set('offline', [...offline]);
 
@@ -93,9 +108,10 @@ async function initAuth() {
     client_id: S.clientId, scope: SCOPE,
     callback: r => {
       if (r && r.access_token) {
-        tok = { t: r.access_token, exp: Date.now() + (Number(r.expires_in || 3600) - 120) * 1000 };
+        tok = { t: r.access_token, exp: Date.now() + (Number(r.expires_in || 3600) - 120) * 1000, scope: r.scope || '' };
         store.set('token', tok);
         banner();
+        whoAmI();
       }
       tokenWaiters.splice(0).forEach(f => f(hasToken() ? tok.t : null));
     },
@@ -133,12 +149,170 @@ async function listAll(q, fields) {
 }
 function banner(need) {
   const b = $('#banner');
-  if (need === undefined) need = !hasToken() && !!S.rootId;
-  if (!need || hasToken()) { b.hidden = true; return; }
-  b.replaceChildren(h('span', null, S.clientId ? 'Connexion à Google Drive expirée.' : 'BossPlay n\'est pas encore relié à Google Drive.'),
+  const oldScope = hasToken() && !String(tok.scope || '').includes('drive.appdata');
+  if (need === undefined) need = (!hasToken() && !!S.rootId) || oldScope;
+  if (!need || (hasToken() && !oldScope)) { b.hidden = true; return; }
+  b.replaceChildren(h('span', null, oldScope ? 'Nouveauté : reconnecte-toi pour retrouver tes favoris sur tous tes appareils.' : S.clientId ? 'Connexion à Google Drive expirée.' : 'BossPlay n\'est pas encore relié à Google Drive.'),
     h('button', { onclick: async () => { const t = await connect(); if (t) { b.hidden = true; if (!lib.tracks.length && S.rootId) scan(); } } }, 'Se connecter'));
   b.hidden = false;
 }
+
+// ---------- Profils et synchronisation ----------
+// Chacun se connecte avec SON compte Google. Son profil (favoris, playlists, clips, écoutes, réglages) est gardé
+// dans le dossier caché de BossPlay de SON Google Drive : rien ne se mélange entre Boss, Sam, Adam et Sofia.
+// Administrateur = le compte qui peut modifier le dossier de musique (Boss) ; Google interdit l'écriture aux autres.
+const sync = { me: store.get('me', null), admin: store.get('admin', false), name: store.get('profileName', ''),
+  fileId: store.get('syncFileId', null), last: store.get('syncLast', 0), dirty: store.get('syncDirty', false), timer: 0, busy: false, error: '' };
+function markDirty() {
+  sync.dirty = true; store.set('syncDirty', true);
+  clearTimeout(sync.timer); sync.timer = setTimeout(() => push(), 4000);
+}
+function addPlay(id) {
+  playLog.push({ id, at: Date.now() });
+  if (playLog.length > 5000) playLog = playLog.slice(-5000);
+  store.set('history', playLog); markDirty();
+}
+async function gfetch(url, opts = {}) {
+  const r = await fetch(url, Object.assign({}, opts, { headers: Object.assign({ Authorization: 'Bearer ' + await token() }, opts.headers || {}) }));
+  if (r.status === 401) { tok = null; store.set('token', null); banner(true); throw new Error('auth'); }
+  return r;
+}
+async function whoAmI() {
+  try {
+    const j = await drive('about', { fields: 'user(displayName,emailAddress)' });
+    const changed = !sync.me || sync.me.email !== j.user.emailAddress;
+    sync.me = { email: j.user.emailAddress, name: j.user.displayName };
+    store.set('me', sync.me);
+    if (changed) { sync.fileId = null; store.set('syncFileId', null); }
+    if (S.rootId) {
+      const f = await drive('files/' + S.rootId, { fields: 'capabilities(canEdit),ownedByMe', supportsAllDrives: true });
+      sync.admin = !!(f.ownedByMe || f.capabilities?.canEdit);
+      store.set('admin', sync.admin);
+    }
+    await pull();
+    if (!sync.name) pickProfile();
+    if (sync.admin) loadFamilyWishes();
+    rcPublish(true);
+    render();
+  } catch (e) { if (e.message !== 'auth') { sync.error = e.message; } }
+}
+function pickProfile() {
+  sheet('Qui écoute sur cet appareil ?', [
+    h('div', { class: 'muted small', style: 'padding:0 12px 6px' }, sync.me ? 'Compte Google : ' + sync.me.email : ''),
+    ...FAMILY.map(n => ({ label: (n === sync.name ? '✓ ' : '') + n + (n === 'Boss' && !sync.admin ? ' (réservé au compte administrateur)' : ''),
+      fn: () => {
+        if (n === 'Boss' && !sync.admin) { toast('« Boss » est réservé au compte qui gère la musique.'); return pickProfile(); }
+        sync.name = n; store.set('profileName', n); markDirty(); render(); toast('Bonjour ' + n + ' !');
+      } })),
+  ]);
+}
+function profileData() {
+  return { v: 1, name: sync.name, updated: Date.now(), favTs, playlists, plDeleted, clips: clipCache, history: playLog,
+    prefs: { theme: S.theme, clipPlayer: S.clipPlayer, clipLyrics: S.clipLyrics, clipAuto: S.clipAuto, afterReturn: S.afterReturn }, extra: extraProfile() };
+}
+function mergeProfile(r) {
+  if (!r || typeof r !== 'object') return;
+  if (r.name && !sync.name) { sync.name = r.name; store.set('profileName', r.name); }
+  for (const [k, v] of Object.entries(r.favTs || {})) if (Math.abs(v) > Math.abs(favTs[k] || 0)) favTs[k] = v;
+  favs.tracks = new Set(Object.keys(favTs).filter(k => k.startsWith('t:') && favTs[k] > 0).map(k => k.slice(2)));
+  favs.albums = new Set(Object.keys(favTs).filter(k => k.startsWith('a:') && favTs[k] > 0).map(k => k.slice(2)));
+  for (const [k, v] of Object.entries(r.plDeleted || {})) if (v > (plDeleted[k] || 0)) plDeleted[k] = v;
+  const byId = new Map(playlists.map(p => [p.id, p]));
+  for (const p of r.playlists || []) { const mine = byId.get(p.id); if (!mine || (p.ts || 0) > (mine.ts || 0)) byId.set(p.id, p); }
+  playlists = [...byId.values()].filter(p => !(plDeleted[p.id] >= (p.ts || 0)));
+  for (const [k, v] of Object.entries(r.clips || {})) if (!clipCache[k] || (v.date || 0) > (clipCache[k].date || 0)) clipCache[k] = v;
+  const seen = new Set(playLog.map(x => x.id + '@' + x.at));
+  for (const x of r.history || []) if (!seen.has(x.id + '@' + x.at)) playLog.push(x);
+  playLog.sort((a, b) => a.at - b.at); if (playLog.length > 5000) playLog = playLog.slice(-5000);
+  if (r.prefs && (r.updated || 0) > sync.last && !sync.dirty) { Object.assign(S, r.prefs); saveS(); applyTheme(); }
+  extraMerge(r.extra);
+  store.set('favTracks', [...favs.tracks]); store.set('favAlbums', [...favs.albums]); store.set('favTs', favTs);
+  store.set('playlists', playlists); store.set('plDeleted', plDeleted); store.set('clips', clipCache); store.set('history', playLog);
+}
+async function findProfileFile() {
+  if (sync.fileId) return sync.fileId;
+  const j = await drive('files', { spaces: 'appDataFolder', q: `name='${PROFILE_FILE}' and trashed=false`, fields: 'files(id,modifiedTime)', pageSize: 10 });
+  sync.fileId = j.files?.[0]?.id || null; store.set('syncFileId', sync.fileId);
+  return sync.fileId;
+}
+async function pull() {
+  if (!hasToken()) return;
+  try {
+    const id = await findProfileFile();
+    if (id) {
+      const r = await gfetch('https://www.googleapis.com/drive/v3/files/' + id + '?alt=media');
+      if (r.status === 404) { sync.fileId = null; store.set('syncFileId', null); }
+      else if (r.ok) { mergeProfile(await r.json()); }
+      else if (r.status === 403) throw new Error('scope');
+    }
+    sync.error = '';
+    if (sync.dirty || !id) await push(true);
+    sync.last = Date.now(); store.set('syncLast', sync.last);
+  } catch (e) {
+    sync.error = e.message === 'scope' || /403/.test(e.message) ? 'Reconnecte-toi (Réglages › Se connecter) pour activer la synchronisation.' : e.message;
+  }
+}
+async function push(force) {
+  if (!hasToken() || sync.busy || (!sync.dirty && !force)) return;
+  sync.busy = true;
+  try {
+    const body = JSON.stringify(profileData());
+    let r;
+    const id = await findProfileFile();
+    if (id) {
+      r = await gfetch('https://www.googleapis.com/upload/drive/v3/files/' + id + '?uploadType=media', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body });
+    }
+    if (!id || r.status === 404) {
+      const meta = { name: PROFILE_FILE, parents: ['appDataFolder'] };
+      r = await gfetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', multipart(meta, body, 'application/json'));
+      if (r.ok) { sync.fileId = (await r.json()).id; store.set('syncFileId', sync.fileId); }
+    }
+    if (!r.ok) throw new Error('envoi ' + r.status);
+    sync.dirty = false; store.set('syncDirty', false);
+    sync.last = Date.now(); store.set('syncLast', sync.last); sync.error = '';
+  } catch (e) { if (e.message !== 'auth') sync.error = 'Synchronisation en attente (' + e.message + ')'; }
+  sync.busy = false;
+}
+function multipart(meta, body, type) {
+  const b = 'bossplay' + Math.random().toString(36).slice(2);
+  return { method: 'POST', headers: { 'Content-Type': 'multipart/related; boundary=' + b },
+    body: `--${b}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n--${b}\r\nContent-Type: ${type}\r\n\r\n${body}\r\n--${b}--` };
+}
+// Index de la bibliothèque, publié par Boss dans le dossier de musique : la famille l'ouvre sans relire tout le Drive.
+async function publishIndex(raw, quiet) {
+  try {
+    raw = raw || await idb.get('library');
+    if (!raw) { if (!quiet) toast('Lis d\'abord la musique.'); return; }
+    const body = JSON.stringify(raw);
+    const j = await drive('files', { q: `'${S.rootId}' in parents and name='${INDEX_FILE}' and trashed=false`, fields: 'files(id)', supportsAllDrives: true, includeItemsFromAllDrives: true });
+    let r;
+    if (j.files?.[0]) r = await gfetch('https://www.googleapis.com/upload/drive/v3/files/' + j.files[0].id + '?uploadType=media&supportsAllDrives=true', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body });
+    else r = await gfetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id', multipart({ name: INDEX_FILE, parents: [S.rootId] }, body, 'application/json'));
+    if (!r.ok) throw new Error(String(r.status));
+    if (!quiet) toast('Bibliothèque publiée pour la famille');
+  } catch (e) { if (!quiet) toast('Publication impossible (' + e.message + ')'); }
+}
+async function loadIndex() {
+  try {
+    setStatus('Ouverture de la bibliothèque familiale…');
+    const j = await drive('files', { q: `'${S.rootId}' in parents and name='${INDEX_FILE}' and trashed=false`, fields: 'files(id,modifiedTime)', supportsAllDrives: true, includeItemsFromAllDrives: true });
+    const f = j.files?.[0]; if (!f) return false;
+    const r = await gfetch('https://www.googleapis.com/drive/v3/files/' + f.id + '?alt=media&supportsAllDrives=true');
+    if (!r.ok) return false;
+    const raw = await r.json();
+    if (!raw || !Array.isArray(raw.tracks)) return false;
+    raw.rootId = S.rootId;
+    await idb.set('library', raw);
+    buildLib(raw);
+    setStatus(`${lib.tracks.length} titres · ${lib.albums.length} albums (bibliothèque publiée par Boss)`);
+    render();
+    return true;
+  } catch { return false; }
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') push();
+  else if (hasToken() && Date.now() - sync.last > 60000) pull().then(() => { if (!clip.on) render(); });
+});
 
 // ---------- Bibliothèque ----------
 let lib = { tracks: [], albums: [], artists: [], byId: new Map(), albumById: new Map(), artistByKey: new Map() };
@@ -175,8 +349,10 @@ function buildLib(raw) {
   for (const t of localTracks) lib.byId.set(t.id, t);
 }
 
-async function scan() {
+async function scan(full = false) {
   if (!S.rootId) { toast('Choisis d\'abord le dossier de musique dans Réglages.'); go('settings'); return; }
+  // Famille : l'index publié par Boss évite de relire tout le Drive.
+  if (!full && !sync.admin && await loadIndex()) return;
   try {
     setStatus('Lecture de Google Drive…');
     const folders = await listAll("mimeType='application/vnd.google-apps.folder' and trashed=false", 'files(id,name,parents)');
@@ -228,6 +404,7 @@ async function scan() {
     const raw = { rootId: S.rootId, date: Date.now(), tracks, covers, photos };
     await idb.set('library', raw);
     buildLib(raw);
+    if (sync.admin) publishIndex(raw, true);
     setStatus(`${lib.tracks.length} titres · ${lib.albums.length} albums · ${lib.artists.length} artistes`);
     render();
   } catch (e) {
@@ -360,8 +537,9 @@ function shuffleRest() {
 }
 async function load(autoplay = true) {
   const t = cur(); if (!t) return;
+  if (radio.st) radioStop();
   const seq = ++P.seq;
-  P.error = ''; ui.loading = true; updatePlayer();
+  P.error = ''; P.counted = false; ui.loading = true; updatePlayer();
   try {
     const u = await srcFor(t);
     if (seq !== P.seq) return;
@@ -396,7 +574,7 @@ function toggle() {
 }
 function playNext(list) { if (!cur()) return play(list); P.queue.splice(P.i + 1, 0, ...list); toast('Sera lu ensuite'); }
 function addQueue(list) { if (!cur()) return play(list); P.queue.push(...list); toast('Ajouté à la file d\'attente'); }
-audio.addEventListener('ended', () => next(false));
+audio.addEventListener('ended', () => { if (sleepEnd()) return; next(false); });
 audio.addEventListener('play', updatePlayer);
 audio.addEventListener('pause', updatePlayer);
 audio.addEventListener('timeupdate', tick);
@@ -428,6 +606,7 @@ function back() { ui.stack.pop(); render(); }
 function filt(list, text) { if (!ui.q) return list; const q = fold(ui.q); return list.filter(x => fold(text(x)).includes(q)); }
 
 function render() {
+  const who = $('#who'); who.hidden = !sync.name; who.textContent = sync.name + (sync.admin ? ' ★' : '');
   document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === ui.tab && !ui.stack.length));
   $('#back').hidden = !ui.stack.length;
   const v = $('#view'); v.replaceChildren();
@@ -437,8 +616,9 @@ function render() {
     if (page.artist) return viewArtist(v, lib.artistByKey.get(page.artist));
     if (page.playlist) return viewPlaylist(v, playlists.find(p => p.id === page.playlist));
   }
-  if (!lib.tracks.length && !localTracks.length && ui.tab !== 'settings') return viewEmpty(v);
-  ({ albums: viewAlbums, artists: viewArtists, songs: viewSongs, favs: viewFavs, playlists: viewPlaylists, settings: viewSettings })[ui.tab](v);
+  if (!lib.tracks.length && !localTracks.length && !['settings', 'radio', 'wishes'].includes(ui.tab)) return viewEmpty(v);
+  ({ albums: viewAlbums, artists: viewArtists, songs: viewSongs, favs: viewFavs, playlists: viewPlaylists, radio: viewRadio, wishes: viewWishes, stats: viewStats, settings: viewSettings })[ui.tab](v);
+  tabBadge();
 }
 function viewEmpty(v) {
   v.append(h('div', { class: 'card' },
@@ -496,7 +676,7 @@ function viewAlbum(v, a) {
       h('div', { class: 'btns' },
         h('button', { class: 'btn', onclick: () => play(a.tracks, 0) }, '▶ Lire'),
         h('button', { class: 'btn alt', onclick: () => { P.shuffle = true; play(a.tracks, Math.floor(Math.random() * a.tracks.length)); } }, 'Aléatoire'),
-        h('button', { class: 'btn alt', onclick: () => { fav ? favs.albums.delete(a.id) : favs.albums.add(a.id); saveFavs(); render(); } }, fav ? '♥ Favori' : '♡ Favori'),
+        h('button', { class: 'btn alt', onclick: () => { toggleFav('a', a.id); render(); } }, fav ? '♥ Favori' : '♡ Favori'),
         a.tracks[0]?.local ? null : h('button', { class: 'btn alt', onclick: () => kept ? unkeep(a) : keep(a) }, kept ? 'Retirer de l\'appareil' : 'Garder hors ligne')))),
     h('div', { class: 'list' }, a.tracks.map((t, i) => trackRow(t, a.tracks, i, { num: true }))));
 }
@@ -527,13 +707,14 @@ function viewPlaylist(v, p) {
   v.append(h('h1', null, p.name),
     h('div', { class: 'btns', style: 'margin-bottom:12px' },
       h('button', { class: 'btn', onclick: () => play(ts, 0) }, '▶ Lire'),
-      h('button', { class: 'btn alt', onclick: () => { const n = prompt('Nouveau nom', p.name); if (n) { p.name = n.trim().slice(0, 80) || p.name; savePl(); render(); } } }, 'Renommer'),
-      h('button', { class: 'btn alt', onclick: () => { if (confirm('Supprimer « ' + p.name + ' » ?')) { playlists = playlists.filter(x => x !== p); savePl(); back(); } } }, 'Supprimer')),
+      h('button', { class: 'btn alt', onclick: () => m3u(p.name, ts) }, 'Exporter M3U'),
+      h('button', { class: 'btn alt', onclick: () => { const n = prompt('Nouveau nom', p.name); if (n) { p.name = n.trim().slice(0, 80) || p.name; savePl(p); render(); } } }, 'Renommer'),
+      h('button', { class: 'btn alt', onclick: () => { if (confirm('Supprimer « ' + p.name + ' » ?')) { plDeleted[p.id] = Date.now(); playlists = playlists.filter(x => x !== p); savePl(); back(); } } }, 'Supprimer')),
     h('div', { class: 'list' }, ts.map((t, i) => trackRow(t, ts, i, { album: true, playlist: p }))));
 }
 function newPlaylist(ids) {
   const n = prompt('Nom de la playlist'); if (!n) return;
-  playlists.push({ id: 'pl' + Date.now().toString(36), name: n.trim().slice(0, 80), ids: [...ids] }); savePl();
+  const np = { id: 'pl' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), name: n.trim().slice(0, 80), ids: [...ids] }; playlists.push(np); savePl(np);
   toast('Playlist « ' + n + ' » créée'); render();
 }
 function localAlbum() { return localTracks.length ? { id: 'local', name: 'Fichiers de l\'iPhone', artist: 'iCloud Drive / Fichiers', tracks: localTracks } : null; }
@@ -552,13 +733,13 @@ function trackMenu(t, pl) {
   sheet(t.title, [
     { label: 'Lire ensuite', fn: () => playNext([t]) },
     { label: 'Ajouter à la file d\'attente', fn: () => addQueue([t]) },
-    { label: fav ? 'Retirer des favoris' : 'Ajouter aux favoris', fn: () => { fav ? favs.tracks.delete(t.id) : favs.tracks.add(t.id); saveFavs(); render(); updatePlayer(); } },
+    { label: fav ? 'Retirer des favoris' : 'Ajouter aux favoris', fn: () => { toggleFav('t', t.id); render(); updatePlayer(); } },
     { label: 'Ajouter à une playlist…', fn: () => sheet('Ajouter à une playlist', [{ label: '+ Nouvelle playlist…', fn: () => newPlaylist([t.id]) },
-      ...playlists.map(p => ({ label: p.name, fn: () => { if (!p.ids.includes(t.id)) p.ids.push(t.id); savePl(); toast('Ajouté à « ' + p.name + ' »'); } }))]) },
+      ...playlists.map(p => ({ label: p.name, fn: () => { if (!p.ids.includes(t.id)) p.ids.push(t.id); savePl(p); toast('Ajouté à « ' + p.name + ' »'); } }))]) },
     { label: 'Clip vidéo…', fn: () => clipPicker(t) },
     !t.local ? { label: 'Aller à l\'album', fn: () => openPage({ album: t.albumId }) } : null,
     lib.artistByKey.has(fold(t.artist)) ? { label: 'Aller à l\'artiste', fn: () => openPage({ artist: fold(t.artist) }) } : null,
-    pl ? { label: 'Retirer de la playlist', red: true, fn: () => { pl.ids = pl.ids.filter(x => x !== t.id); savePl(); render(); } } : null,
+    pl ? { label: 'Retirer de la playlist', red: true, fn: () => { pl.ids = pl.ids.filter(x => x !== t.id); savePl(pl); render(); } } : null,
   ]);
 }
 
@@ -638,6 +819,7 @@ function updatePlayer() {
     if (key) loadCover(key).then(u => { if (u && cur() === t) $('#full .bg').style.backgroundImage = `url(${u})`; });
   }
   if (!$('#full .lyrics').hidden) showLyrics();
+  updateBadges(t); sleepBtn(); rcPublish();
 }
 function renderPlaying() {
   const t = cur();
@@ -648,6 +830,8 @@ function renderPlaying() {
 }
 function tick() {
   const d = audio.duration || 0, c = audio.currentTime || 0;
+  // Une écoute compte après 30 s (ou la moitié d'un titre court).
+  if (!P.counted && cur() && d && c >= Math.min(30, d / 2)) { P.counted = true; addPlay(cur().id); }
   $('#mini .fill').style.width = d ? (c / d * 100) + '%' : '0';
   if (!$('#full').hidden) {
     if (!tick.drag) $('#full .seek').value = d ? Math.round(c / d * 1000) : 0;
@@ -719,7 +903,7 @@ function syncLyrics(box, ms) {
 
 // ---------- Clips YouTube ----------
 let clipCache = store.get('clips', {});      // id du titre → { chosen, cands:[{id,title,channel,thumb}], none, manual, offset, date }
-const saveClips = () => store.set('clips', clipCache);
+const saveClips = () => { store.set('clips', clipCache); markDirty(); };
 const validId = s => /^[A-Za-z0-9_-]{11}$/.test(s || '');
 function scoreClip(c, artist, title) {
   const t = fold(c.title), ch = fold(c.channel), a = fold(artist).trim(), s = fold(cleanTitle(title)).trim();
@@ -920,7 +1104,7 @@ $('#clip .seek').addEventListener('change', e => {
 $('#clip .lmode').onclick = () => { S.clipLyrics = { off: 'left', left: 'subs', subs: 'off' }[S.clipLyrics]; saveS(); clipLayout(); };
 $('#clip .minus').onclick = () => shiftOffset(-500);
 $('#clip .plus').onclick = () => shiftOffset(500);
-function shiftOffset(d) { const t = cur(); if (!t) return; const c = clipCache[t.id] || (clipCache[t.id] = { cands: [], offset: 0, date: Date.now() }); c.offset = Math.max(-60000, Math.min(60000, (c.offset || 0) + d)); saveClips(); toast('Décalage des paroles : ' + (c.offset / 1000).toFixed(1).replace('.', ',') + ' s', 1200); }
+function shiftOffset(d) { const t = cur(); if (!t) return; const c = clipCache[t.id] || (clipCache[t.id] = { cands: [], offset: 0, date: Date.now() }); c.offset = Math.max(-60000, Math.min(60000, (c.offset || 0) + d)); c.date = Date.now(); saveClips(); toast('Décalage des paroles : ' + (c.offset / 1000).toFixed(1).replace('.', ',') + ' s', 1200); }
 $('#clip .src').onclick = () => {
   const t = cur(); if (!t) return; const id = clipCache[t.id]?.chosen;
   sheet('Clip', [
@@ -937,10 +1121,22 @@ function viewSettings(v) {
   const id = h('input', { class: 'field', value: S.clientId, placeholder: '…apps.googleusercontent.com' });
   const pills = (key, opts, after) => h('div', { class: 'row' }, opts.map(([val, label]) =>
     h('button', { class: 'pill' + (S[key] === val ? ' on' : ''), onclick: () => { S[key] = val; saveS(); if (after) after(); render(); } }, label)));
+  const ago = sync.last ? Math.max(0, Math.round((Date.now() - sync.last) / 60000)) : null;
   v.append(h('h1', null, 'Réglages'),
+    h('div', { class: 'card' }, h('h2', { style: 'margin-top:0' }, 'Profil'),
+      h('div', { class: 'row' }, h('b', { style: 'font-size:18px' }, sync.name || 'Aucun profil choisi'), sync.admin ? h('span', { class: 'pill on' }, 'Administrateur') : null,
+        h('button', { class: 'pill', onclick: () => hasToken() ? pickProfile() : connect() }, 'Changer')),
+      h('p', { class: 'muted small' }, sync.me ? 'Compte Google : ' + sync.me.email : 'Connecte-toi avec ton propre compte Google : tes favoris, playlists et écoutes te suivent sur tous tes appareils, sans se mélanger avec ceux de la famille.'),
+      h('p', { class: 'small', style: sync.error ? 'color:var(--red)' : '' }, sync.error || (ago == null ? '' : '✓ Synchronisé ' + (ago < 1 ? 'à l\'instant' : 'il y a ' + ago + ' min') + ' · ' + favs.tracks.size + ' titres favoris · ' + playlists.length + ' playlists · ' + playLog.length + ' écoutes')),
+      h('button', { class: 'pill', onclick: async () => { if (!hasToken() && !(await connect())) return; await pull(); toast(sync.error || 'Synchronisé'); render(); } }, 'Synchroniser maintenant')),
+    sync.admin ? h('div', { class: 'card' }, h('h2', { style: 'margin-top:0' }, 'Administration (Boss)'),
+      h('p', { class: 'muted small' }, 'Pour la famille : dans Google Drive, partage le dossier de musique avec les comptes de Sam, Adam et Sofia en tant que « Lecteur ». Google les empêche alors de modifier ou supprimer quoi que ce soit.'),
+      h('div', { class: 'btns' },
+        h('button', { class: 'btn', onclick: () => publishIndex(null, false) }, 'Publier la bibliothèque pour la famille'),
+        h('button', { class: 'btn alt', onclick: async () => { if (!hasToken() && !(await connect())) return; scan(true); } }, 'Relire toute la musique'))) : null,
     h('div', { class: 'card' }, h('h2', { style: 'margin-top:0' }, 'Google Drive'),
-      h('div', { class: 'muted small' }, 'ID client OAuth (Application Web) de ton projet Google Cloud :'),
-      h('div', { class: 'row', style: 'margin:6px 0 10px' }, id, h('button', { class: 'btn', onclick: () => { S.clientId = id.value.trim(); saveS(); tokenClient = null; toast('ID client enregistré'); render(); } }, 'Enregistrer')),
+      sync.admin || !S.clientId ? h('div', { class: 'muted small' }, 'ID client OAuth (Application Web) de ton projet Google Cloud :') : null,
+      sync.admin || !S.clientId ? h('div', { class: 'row', style: 'margin:6px 0 10px' }, id, h('button', { class: 'btn', onclick: () => { S.clientId = id.value.trim(); saveS(); tokenClient = null; toast('ID client enregistré'); render(); } }, 'Enregistrer')) : null,
       h('div', null, hasToken() ? '✓ Connecté à Google Drive' : 'Pas connecté', ' ',
         h('button', { class: 'pill', onclick: async () => { if (await connect()) render(); } }, hasToken() ? 'Reconnecter' : 'Se connecter')),
       h('p', null, 'Dossier de musique : ', h('b', null, S.rootName || 'aucun')),
@@ -963,6 +1159,7 @@ function viewSettings(v) {
       h('div', { class: 'muted small', style: 'margin-top:10px' }, 'À la fin d\'un clip :'),
       pills('clipAuto', [[true, 'Titre suivant'], [false, 'Revenir à la pochette']]),
       h('div', { class: 'btns' }, h('button', { class: 'pill', onclick: () => { clipCache = {}; saveClips(); toast('Clips oubliés'); } }, 'Oublier les clips trouvés'))),
+    extrasSettings(),
     h('div', { class: 'card' }, h('h2', { style: 'margin-top:0' }, 'Affichage'),
       pills('theme', [['auto', 'Automatique'], ['light', 'Jour'], ['dark', 'Nuit']], applyTheme),
       h('p', { class: 'muted small', id: 'usage' }, '')),
@@ -978,10 +1175,12 @@ async function browse(id, path) {
   if (!hasToken() && !(await connect())) return;
   sheet(path.map(p => p[1]).join(' › '), [h('div', { class: 'muted small', style: 'padding:0 12px' }, 'Lecture…')]);
   try {
-    const q = `'${id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`;
+    const q = id === 'shared' ? "sharedWithMe = true and mimeType='application/vnd.google-apps.folder' and trashed=false"
+      : `'${id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`;
     const j = await drive('files', { q, fields: 'files(id,name)', pageSize: 1000, orderBy: 'name', supportsAllDrives: true, includeItemsFromAllDrives: true });
     sheet(path.map(p => p[1]).join(' › '), [
-      id !== 'root' ? { label: '✓ Utiliser ce dossier', fn: () => { S.rootId = id; S.rootName = path.slice(1).map(p => p[1]).join(' › '); saveS(); scan(); render(); } } : null,
+      id === 'root' ? { label: '📤 Partagés avec moi (musique de Boss)', fn: () => browse('shared', path.concat([['shared', 'Partagés avec moi']])) } : null,
+      id !== 'root' && id !== 'shared' ? { label: '✓ Utiliser ce dossier', fn: async () => { S.rootId = id; S.rootName = path.slice(1).map(p => p[1]).join(' › '); saveS(); await whoAmI(); scan(); render(); } } : null,
       path.length > 1 ? { label: '‹ Dossier parent', fn: () => browse(path[path.length - 2][0], path.slice(0, -1)) } : null,
       ...(j.files || []).map(f => ({ label: '📁 ' + f.name, fn: () => browse(f.id, path.concat([[f.id, f.name]])) })),
     ]);
@@ -992,8 +1191,9 @@ function applyTheme() { document.documentElement.dataset.theme = S.theme; }
 // ---------- Boutons ----------
 document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => go(b.dataset.tab));
 $('#back').onclick = back;
+$('#who').onclick = () => hasToken() ? pickProfile() : connect();
 $('#theme').onclick = () => { S.theme = { auto: 'dark', dark: 'light', light: 'auto' }[S.theme]; saveS(); applyTheme(); toast({ auto: 'Thème automatique', dark: 'Thème nuit', light: 'Thème jour' }[S.theme], 1200); };
-$('#search').addEventListener('input', e => { ui.q = e.target.value; if (ui.tab === 'settings' || ui.tab === 'favs' || ui.tab === 'playlists') ui.tab = 'songs'; ui.stack = []; render(); });
+$('#search').addEventListener('input', e => { ui.q = e.target.value; if (!['albums', 'artists', 'songs'].includes(ui.tab)) ui.tab = 'songs'; ui.stack = []; render(); });
 $('#mini .meta').onclick = $('#mini .art').onclick = () => { $('#full').hidden = false; updatePlayer(); tick(); };
 $('#mini .play').onclick = $('#full .play').onclick = toggle;
 $('#mini .next').onclick = $('#full .next').onclick = () => next(true);
@@ -1001,9 +1201,13 @@ $('#mini .prev').onclick = $('#full .prev').onclick = prev;
 $('#full .close').onclick = () => { $('#full').hidden = true; };
 $('#full .shuffle').onclick = () => { P.shuffle = !P.shuffle; if (P.shuffle) shuffleRest(); updatePlayer(); };
 $('#full .repeat').onclick = () => { P.repeat = (P.repeat + 1) % 3; updatePlayer(); };
-$('#full .fav').onclick = () => { const t = cur(); if (!t) return; favs.tracks.has(t.id) ? favs.tracks.delete(t.id) : favs.tracks.add(t.id); saveFavs(); updatePlayer(); };
+$('#full .fav').onclick = () => { const t = cur(); if (!t) return; toggleFav('t', t.id); updatePlayer(); };
 $('#full .more').onclick = () => { const t = cur(); if (t) trackMenu(t); };
 $('#full .clip').onclick = openClip;
+$('#full .sleep').onclick = sleepSheet;
+$('#full .kara').onclick = karaoke;
+$('#mic').onclick = voice;
+$('#remote').onclick = remoteSheet;
 $('#full .lyr').onclick = () => {
   const box = $('#full .lyrics'), cov = $('#full .cover');
   const show = box.hidden; box.hidden = !show; cov.hidden = show; $('#full .lyr').classList.toggle('on', show);
@@ -1014,6 +1218,496 @@ $('#full .album').onclick = () => { const t = cur(); if (t) { $('#full').hidden 
 $('#full .seek').addEventListener('input', () => { tick.drag = true; });
 $('#full .seek').addEventListener('change', e => { tick.drag = false; if (audio.duration) audio.currentTime = e.target.value / 1000 * audio.duration; });
 
+
+// =====================================================================================================
+// BossPlay 1.3 : radio + « Retenir ce titre », envies de la famille, écoutes, minuteur, télécommande,
+// karaoké, commande vocale, badges de format, export M3U.
+// =====================================================================================================
+const X = {
+  radios: store.get('xRadios', []),          // radios favorites [{ id, name, url, favicon, country, tags, ts }]
+  radiosDel: store.get('xRadiosDel', {}),
+  wishes: store.get('xWishes', []),          // mes envies [{ id, at, station, title, artist, note, by }]
+  wishDel: store.get('xWishDel', {}),
+  bought: store.get('xBought', {}),          // Boss : envies achetées ou masquées { id: date }
+  wishSeen: store.get('xWishSeen', 0),       // Boss : date de la dernière envie vue
+  family: [],                                // Boss : envies de toute la famille [{ ...envie, who }]
+  newCount: 0,
+};
+const saveX = () => {
+  store.set('xRadios', X.radios); store.set('xRadiosDel', X.radiosDel); store.set('xWishes', X.wishes);
+  store.set('xWishDel', X.wishDel); store.set('xBought', X.bought); store.set('xWishSeen', X.wishSeen); markDirty();
+};
+function extraProfile() { return { radios: X.radios, radiosDel: X.radiosDel, wishes: X.wishes, wishDel: X.wishDel, bought: X.bought, wishSeen: X.wishSeen }; }
+function extraMerge(e) {
+  if (!e || typeof e !== 'object') return;
+  const mergeList = (mine, theirs, delMine, delTheirs, key = 'id') => {
+    for (const [k, v] of Object.entries(delTheirs || {})) if (v > (delMine[k] || 0)) delMine[k] = v;
+    const m = new Map(mine.map(x => [x[key], x]));
+    for (const x of theirs || []) { const y = m.get(x[key]); if (!y || (x.ts || x.at || 0) > (y.ts || y.at || 0)) m.set(x[key], x); }
+    return [...m.values()].filter(x => !(delMine[x[key]] >= (x.ts || x.at || 0)));
+  };
+  X.radios = mergeList(X.radios, e.radios, X.radiosDel, e.radiosDel);
+  X.wishes = mergeList(X.wishes, e.wishes, X.wishDel, e.wishDel).sort((a, b) => b.at - a.at);
+  for (const [k, v] of Object.entries(e.bought || {})) if (!X.bought[k] || v > X.bought[k]) X.bought[k] = v;
+  X.wishSeen = Math.max(X.wishSeen, e.wishSeen || 0);
+  store.set('xRadios', X.radios); store.set('xRadiosDel', X.radiosDel); store.set('xWishes', X.wishes);
+  store.set('xWishDel', X.wishDel); store.set('xBought', X.bought); store.set('xWishSeen', X.wishSeen);
+}
+const when = at => new Date(at).toLocaleString('fr-CA', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+async function appData(name) {
+  const j = await drive('files', { spaces: 'appDataFolder', q: `name='${name}' and trashed=false`, fields: 'files(id,modifiedTime)', pageSize: 5 });
+  return j.files?.[0] || null;
+}
+async function writeJson(name, data, id, parents) {
+  const body = JSON.stringify(data);
+  let r;
+  if (id) r = await gfetch('https://www.googleapis.com/upload/drive/v3/files/' + id + '?uploadType=media', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body });
+  if (!id || r.status === 404) {
+    r = await gfetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', multipart({ name, parents: parents || ['appDataFolder'] }, body, 'application/json'));
+    if (r.ok) return (await r.json()).id;
+  }
+  if (!r.ok) throw new Error('écriture ' + r.status);
+  return id;
+}
+async function readJson(id) {
+  const r = await gfetch('https://www.googleapis.com/drive/v3/files/' + id + '?alt=media&supportsAllDrives=true');
+  if (!r.ok) throw new Error('lecture ' + r.status);
+  return r.json();
+}
+
+// ---------- Radio (Radio Browser, flux https uniquement) ----------
+const radio = { el: new Audio(), st: null, results: [], q: '', loading: false, msg: '' };
+radio.el.preload = 'none';
+const RB = ['https://de1.api.radio-browser.info', 'https://nl1.api.radio-browser.info', 'https://at1.api.radio-browser.info'];
+async function rbGet(path) {
+  for (const base of RB) {
+    try { const r = await fetch(base + path); if (r.ok) return await r.json(); } catch { }
+  }
+  throw new Error('service radio injoignable');
+}
+const toStation = s => ({ id: s.stationuuid, name: (s.name || '').trim() || 'Radio', url: s.url_resolved || s.url, favicon: s.favicon || '', country: s.countrycode || '', tags: (s.tags || '').split(',').slice(0, 3).join(', '), ts: Date.now() });
+async function radioSearch(q) {
+  radio.loading = true; radio.msg = ''; render();
+  try {
+    const path = q ? '/json/stations/search?name=' + encodeURIComponent(q) + '&hidebroken=true&order=clickcount&reverse=true&limit=80'
+      : '/json/stations/bycountrycodeexact/CA?hidebroken=true&order=clickcount&reverse=true&limit=80';
+    radio.results = (await rbGet(path)).filter(s => /^https:/i.test(s.url_resolved || '')).map(toStation);
+    if (!radio.results.length) radio.msg = 'Aucune radio en https trouvée.';
+  } catch (e) { radio.msg = e.message; }
+  radio.loading = false; render();
+}
+function radioPlay(st) {
+  audio.pause();
+  radio.st = st; radio.el.src = st.url;
+  radio.el.play().then(() => toast('📻 ' + st.name)).catch(() => toast('Cette radio ne se lit pas sur cet appareil.'));
+  if ('mediaSession' in navigator) navigator.mediaSession.metadata = new MediaMetadata({ title: st.name, artist: 'Radio', album: st.tags || 'BossPlay Radio', artwork: st.favicon ? [{ src: st.favicon, sizes: '256x256' }] : [] });
+  try { fetch(RB[0] + '/json/url/' + st.id).catch(() => { }); } catch { }
+  render(); radioBar();
+}
+function radioStop() { if (!radio.st) return; radio.el.pause(); radio.el.removeAttribute('src'); radio.el.load(); radio.st = null; radioBar(); if (ui.tab === 'radio') render(); }
+radio.el.addEventListener('pause', radioBar); radio.el.addEventListener('play', radioBar);
+function radioBar() {
+  let b = $('#radiobar');
+  if (!radio.st) { if (b) b.remove(); return; }
+  if (!b) { b = h('div', { id: 'radiobar' }); $('#app').insertBefore(b, $('#mini')); }
+  b.replaceChildren(
+    radio.st.favicon ? h('img', { src: radio.st.favicon, alt: '', onerror: e => e.target.remove() }) : h('span', { class: 'rlogo' }, '📻'),
+    h('div', { class: 'm' }, h('div', { class: 't' }, radio.st.name), h('div', { class: 's' }, radio.el.paused ? 'En pause' : 'En direct')),
+    h('button', { class: 'pill wish', onclick: () => wishSheet() }, '♥ Retenir ce titre'),
+    h('button', { class: 'icon', onclick: () => radio.el.paused ? radio.el.play() : radio.el.pause() }, radio.el.paused ? '▶' : '⏸'),
+    h('button', { class: 'icon', onclick: radioStop }, '⏹'));
+}
+const isFavRadio = st => X.radios.some(r => r.id === st.id);
+function favRadio(st) {
+  if (isFavRadio(st)) { X.radios = X.radios.filter(r => r.id !== st.id); X.radiosDel[st.id] = Date.now(); toast('Retirée de mes radios'); }
+  else { X.radios.push(Object.assign({}, st, { ts: Date.now() })); delete X.radiosDel[st.id]; toast('Ajoutée à mes radios'); }
+  saveX(); render();
+}
+function stationRow(st) {
+  const on = radio.st && radio.st.id === st.id;
+  return h('div', { class: 'tr' + (on ? ' playing' : ''), onclick: () => radioPlay(st) },
+    st.favicon ? h('img', { class: 'rfav', src: st.favicon, alt: '', loading: 'lazy', onerror: e => { e.target.replaceWith(h('div', { class: 'no' }, '📻')); } }) : h('div', { class: 'no' }, '📻'),
+    h('div', { class: 'm' }, h('div', null, st.name), h('div', { class: 's' }, [st.country, st.tags].filter(Boolean).join(' · '))),
+    h('button', { class: 'x', style: isFavRadio(st) ? 'color:var(--red)' : '', onclick: e => { e.stopPropagation(); favRadio(st); } }, isFavRadio(st) ? '♥' : '♡'));
+}
+function viewRadio(v) {
+  const q = h('input', { class: 'field', type: 'search', placeholder: 'Nom de radio, ville, style (ex. CKOI, jazz, Montréal)…', value: radio.q });
+  const go2 = () => { radio.q = q.value.trim(); radioSearch(radio.q); };
+  q.addEventListener('keydown', e => { if (e.key === 'Enter') go2(); });
+  v.append(h('h1', null, 'Radio'),
+    h('div', { class: 'row', style: 'margin-bottom:12px' }, q, h('button', { class: 'btn', onclick: go2 }, 'Chercher')),
+    h('p', { class: 'muted small' }, 'Pendant l\'écoute, « ♥ Retenir ce titre » garde la chanson dans tes envies' + (sync.admin ? '.' : ' et la transmet à Boss.') + ' Astuce : lance Shazam depuis le Centre de contrôle pour connaître le titre.'));
+  if (X.radios.length) v.append(h('h2', null, 'Mes radios'), h('div', { class: 'list' }, X.radios.map(stationRow)));
+  v.append(h('h2', null, radio.q ? 'Résultats' : 'Populaires au Canada'));
+  if (radio.loading) v.append(h('p', { class: 'muted' }, 'Recherche…'));
+  else if (radio.msg) v.append(h('p', { class: 'muted' }, radio.msg));
+  else v.append(h('div', { class: 'list' }, radio.results.map(stationRow)));
+  if (!radio.results.length && !radio.loading && !radio.msg) radioSearch('');
+}
+
+// ---------- Envies (« Retenir ce titre ») ----------
+function wishSheet(pre = {}) {
+  const st = radio.st;
+  const ti = h('input', { class: 'field', placeholder: 'Titre de la chanson (si tu le connais)', value: pre.title || '' });
+  const ar = h('input', { class: 'field', placeholder: 'Artiste', value: pre.artist || '' });
+  const no = h('input', { class: 'field', placeholder: 'Note (ex. « refrain : I will survive »)', value: '' });
+  const box = h('div', { style: 'padding:0 12px 8px;display:grid;gap:8px' },
+    h('div', { class: 'muted small' }, (st ? '📻 ' + st.name + ' · ' : '') + when(Date.now())), ti, ar, no,
+    h('button', { class: 'btn', onclick: () => { $('#sheet').hidden = true; addWish({ station: st ? st.name : (pre.station || ''), title: ti.value.trim(), artist: ar.value.trim(), note: no.value.trim() }); } }, '♥ Retenir'));
+  sheet('Retenir ce titre', [box]);
+  setTimeout(() => ti.focus(), 200);
+}
+function addWish(w) {
+  const e = Object.assign({ id: 'w' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), at: Date.now(), by: sync.name || 'Boss' }, w);
+  X.wishes.unshift(e); saveX();
+  toast(sync.admin ? '♥ Ajouté à ta liste d\'achats' : '♥ Retenu — Boss le verra dans sa liste');
+  publishWishes();
+  if (ui.tab === 'wishes') render();
+}
+function delWish(w) { X.wishes = X.wishes.filter(x => x.id !== w.id); X.wishDel[w.id] = Date.now(); saveX(); publishWishes(); render(); }
+// Chaque membre garde sa liste dans un fichier de SON Drive, partagé en lecture avec Boss (courriel de Google au 1er partage).
+async function adminEmail() {
+  if (S.adminEmail) return S.adminEmail;
+  if (!S.rootId) return null;
+  try { const f = await drive('files/' + S.rootId, { fields: 'owners(emailAddress)', supportsAllDrives: true }); S.adminEmail = f.owners?.[0]?.emailAddress || ''; saveS(); } catch { }
+  return S.adminEmail || null;
+}
+let wishTimer = 0;
+function publishWishes() { clearTimeout(wishTimer); wishTimer = setTimeout(doPublishWishes, 1500); }
+async function doPublishWishes() {
+  if (!hasToken() || !sync.name) return;
+  const name = 'bossplay-envies-' + sync.name + '.json';
+  try {
+    let id = store.get('xWishFile', null);
+    if (!id) { const j = await drive('files', { q: `name='${name}' and 'me' in owners and trashed=false`, fields: 'files(id)', pageSize: 3 }); id = j.files?.[0]?.id || null; }
+    const data = { who: sync.name, email: sync.me?.email || '', updated: Date.now(), wishes: X.wishes };
+    const newId = await writeJson(name, data, id, ['root']);
+    store.set('xWishFile', newId);
+    if (!sync.admin && !store.get('xWishShared', false)) {
+      const to = await adminEmail();
+      if (to && to !== sync.me?.email) {
+        const r = await gfetch('https://www.googleapis.com/drive/v3/files/' + newId + '/permissions?sendNotificationEmail=true&emailMessage=' +
+          encodeURIComponent(sync.name + ' a retenu des chansons dans BossPlay. Ouvre BossPlay › Envies.'), {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ role: 'reader', type: 'user', emailAddress: to }) });
+        if (r.ok) store.set('xWishShared', true);
+      }
+    }
+  } catch (e) { if (e.message !== 'auth') console.warn('envies', e); }
+}
+async function loadFamilyWishes() {
+  if (!sync.admin || !hasToken()) return;
+  try {
+    const j = await drive('files', { q: "name contains 'bossplay-envies-' and trashed=false", fields: 'files(id,name,modifiedTime,owners(displayName,emailAddress))', pageSize: 50 });
+    const all = [];
+    for (const f of j.files || []) {
+      try {
+        const d = await readJson(f.id);
+        if (d.email && d.email === sync.me?.email) continue;            // mes propres envies sont déjà dans X.wishes
+        for (const w of d.wishes || []) all.push(Object.assign({}, w, { who: d.who || f.owners?.[0]?.displayName || '?' }));
+      } catch { }
+    }
+    X.family = all.sort((a, b) => b.at - a.at);
+    const fresh = X.family.filter(w => w.at > X.wishSeen && !X.bought[w.id]);
+    X.newCount = fresh.length;
+    tabBadge();
+    if (fresh.length) {
+      const per = {}; fresh.forEach(w => per[w.who] = (per[w.who] || 0) + 1);
+      toast('♥ Nouvelles envies : ' + Object.entries(per).map(([k, n]) => k + ' ' + n).join(', '), 5000);
+    }
+  } catch (e) { if (e.message !== 'auth') console.warn('envies famille', e); }
+}
+function tabBadge() {
+  const b = $('#tabs [data-tab="wishes"]'); if (b) b.dataset.badge = X.newCount ? String(X.newCount) : '';
+  try { X.newCount ? navigator.setAppBadge?.(X.newCount) : navigator.clearAppBadge?.(); } catch { }
+}
+const buyLinks = w => {
+  const q = encodeURIComponent([w.artist, w.title].filter(Boolean).join(' ') || w.note || w.station);
+  return [h('a', { class: 'pill', href: 'https://music.apple.com/ca/search?term=' + q, target: '_blank', rel: 'noopener' }, 'iTunes'),
+    h('a', { class: 'pill', href: 'https://www.amazon.ca/s?k=' + q + '&i=digital-music', target: '_blank', rel: 'noopener' }, 'Amazon'),
+    h('a', { class: 'pill', href: 'https://www.youtube.com/results?search_query=' + q, target: '_blank', rel: 'noopener' }, 'YouTube')];
+};
+function wishRow(w, mine) {
+  const done = !!X.bought[w.id];
+  return h('div', { class: 'card wishc' + (done ? ' done' : '') },
+    h('div', { class: 'row', style: 'justify-content:space-between' },
+      h('b', null, (w.title || 'Titre inconnu') + (w.artist ? ' — ' + w.artist : '')),
+      w.who ? h('span', { class: 'pill on' }, w.who) : null),
+    h('div', { class: 'muted small' }, [w.station ? '📻 ' + w.station : '', when(w.at)].filter(Boolean).join(' · ')),
+    w.note ? h('div', { class: 'small' }, '« ' + w.note + ' »') : null,
+    h('div', { class: 'row', style: 'margin-top:8px' }, ...(sync.admin ? buyLinks(w) : []),
+      sync.admin ? h('button', { class: 'pill' + (done ? ' on' : ''), onclick: () => { if (done) delete X.bought[w.id]; else X.bought[w.id] = Date.now(); saveX(); render(); } }, done ? '✓ Acheté' : 'Marquer acheté') : null,
+      mine ? h('button', { class: 'pill', onclick: () => delWish(w) }, 'Retirer') : null));
+}
+function viewWishes(v) {
+  if (sync.admin) {
+    if (X.newCount) { X.wishSeen = Date.now(); X.newCount = 0; saveX(); tabBadge(); }
+    const todo = X.family.concat(X.wishes.map(w => Object.assign({ who: 'Boss' }, w))).sort((a, b) => b.at - a.at);
+    const open = todo.filter(w => !X.bought[w.id]), done = todo.filter(w => X.bought[w.id]);
+    v.append(h('h1', null, 'Liste d\'achats de la famille'),
+      h('p', { class: 'muted small' }, 'Chansons retenues à la radio par Sam, Adam, Sofia et toi. Les membres partagent leur liste avec ton compte Google : tu reçois un courriel au premier partage, puis le badge « Envies » t\'avertit.'),
+      h('div', { class: 'btns', style: 'margin-bottom:10px' }, h('button', { class: 'pill', onclick: async () => { await loadFamilyWishes(); render(); toast('Liste à jour'); } }, 'Actualiser'),
+        h('button', { class: 'pill', onclick: () => wishSheet() }, '+ Ajouter à la main')));
+    v.append(h('h2', null, 'À acheter (' + open.length + ')'));
+    if (!open.length) v.append(h('p', { class: 'muted' }, 'Rien pour l\'instant.'));
+    open.forEach(w => v.append(wishRow(w, w.who === 'Boss')));
+    if (done.length) { v.append(h('h2', null, 'Achetés (' + done.length + ')')); done.forEach(w => v.append(wishRow(w, w.who === 'Boss'))); }
+  } else {
+    v.append(h('h1', null, 'Mes envies'),
+      h('p', { class: 'muted small' }, 'Les chansons que tu retiens à la radio sont envoyées à Boss pour qu\'il les ajoute à la bibliothèque.'),
+      h('div', { class: 'btns', style: 'margin-bottom:10px' }, h('button', { class: 'pill', onclick: () => wishSheet() }, '+ Ajouter à la main')));
+    if (!X.wishes.length) v.append(h('p', { class: 'muted' }, 'Aucune envie. Écoute la radio et touche « ♥ Retenir ce titre ».'));
+    X.wishes.forEach(w => v.append(wishRow(w, true)));
+  }
+}
+
+// ---------- Écoutes et statistiques ----------
+const statsUi = { period: 30 };
+function viewStats(v) {
+  const now = Date.now(), y = new Date().getFullYear();
+  const from = statsUi.period === 'year' ? new Date(y, 0, 1).getTime() : statsUi.period ? now - statsUi.period * 86400000 : 0;
+  const log = playLog.filter(x => x.at >= from && lib.byId.has(x.id));
+  const count = (key) => { const m = new Map(); for (const x of log) { const t = lib.byId.get(x.id); const k = key(t); if (k) m.set(k, (m.get(k) || 0) + 1); } return [...m.entries()].sort((a, b) => b[1] - a[1]); };
+  const topT = count(t => t.id).slice(0, 25), topA = count(t => t.albumArtist || t.artist).slice(0, 15), topAl = count(t => t.albumId).slice(0, 12);
+  const pill = (val, label) => h('button', { class: 'pill' + (statsUi.period === val ? ' on' : ''), onclick: () => { statsUi.period = val; render(); } }, label);
+  v.append(h('h1', null, statsUi.period === 'year' ? 'Mon récap ' + y : 'Mes écoutes'),
+    h('div', { class: 'row', style: 'margin-bottom:12px' }, pill(7, '7 jours'), pill(30, '30 jours'), pill('year', 'Récap ' + y), pill(0, 'Tout')),
+    h('div', { class: 'card' }, h('div', { class: 'stat' }, h('b', null, String(log.length)), ' écoutes'),
+      h('div', { class: 'stat' }, h('b', null, String(new Set(log.map(x => x.id)).size)), ' titres différents'),
+      h('div', { class: 'stat' }, h('b', null, String(new Set(log.map(x => lib.byId.get(x.id).albumArtist)).size)), ' artistes')));
+  if (!log.length) { v.append(h('p', { class: 'muted' }, 'Pas encore d\'écoutes sur cette période (une écoute compte après 30 secondes).')); return; }
+  if (topAl.length) v.append(h('h2', null, 'Albums les plus écoutés'), h('div', { class: 'grid' }, topAl.map(([id]) => lib.albumById.get(id)).filter(Boolean).map(albumCell)));
+  v.append(h('h2', null, 'Artistes'), h('div', { class: 'list' }, topA.map(([n, c], i) => h('div', { class: 'tr', onclick: () => lib.artistByKey.has(fold(n)) && openPage({ artist: fold(n) }) },
+    h('div', { class: 'no' }, String(i + 1)), h('div', { class: 'm' }, h('div', null, n), h('div', { class: 's' }, c + ' écoutes'))))));
+  const ts = topT.map(([id]) => lib.byId.get(id));
+  v.append(h('h2', null, 'Titres'), h('div', { class: 'btns', style: 'margin-bottom:8px' }, h('button', { class: 'btn', onclick: () => play(ts, 0) }, '▶ Lire mon top'),
+    h('button', { class: 'btn alt', onclick: () => { const np = { id: 'pl' + Date.now().toString(36), name: 'Mon top ' + (statsUi.period === 'year' ? y : new Date().toLocaleDateString('fr-CA')), ids: ts.map(t => t.id) }; playlists.push(np); savePl(np); toast('Playlist créée'); } }, 'En faire une playlist')),
+    h('div', { class: 'list' }, topT.map(([id, c], i) => { const t = lib.byId.get(id); const row = trackRow(t, ts, i, { album: true }); row.querySelector('.s').textContent += ' · ' + c + ' écoutes'; return row; })));
+  const recent = playLog.slice(-60).reverse().map(x => ({ t: lib.byId.get(x.id), at: x.at })).filter(x => x.t);
+  v.append(h('h2', null, 'Historique'), h('div', { class: 'list' }, recent.map((x, i) => {
+    const row = trackRow(x.t, recent.map(r => r.t), i, { album: true }); row.querySelector('.no').textContent = new Date(x.at).toLocaleTimeString('fr-CA', { hour: '2-digit', minute: '2-digit' }); return row;
+  })));
+}
+
+// ---------- Minuteur de sommeil ----------
+const sleepT = { end: 0, endOfTrack: false, timer: 0, vol: 1 };
+function sleepSheet() {
+  const left = sleepT.end ? Math.max(0, Math.round((sleepT.end - Date.now()) / 60000)) : 0;
+  sheet(sleepT.end || sleepT.endOfTrack ? 'Minuteur : ' + (sleepT.endOfTrack ? 'fin du titre' : left + ' min restantes') : 'Arrêter la musique dans…', [
+    ...[15, 30, 45, 60, 90].map(m => ({ label: m + ' minutes', fn: () => setSleep(m) })),
+    { label: 'À la fin de ce titre', fn: () => { clearSleep(); sleepT.endOfTrack = true; toast('Arrêt à la fin du titre'); sleepBtn(); } },
+    sleepT.end || sleepT.endOfTrack ? { label: 'Annuler le minuteur', red: true, fn: () => { clearSleep(); toast('Minuteur annulé'); } } : null]);
+}
+function setSleep(m) {
+  clearSleep(); sleepT.end = Date.now() + m * 60000;
+  sleepT.timer = setInterval(() => {
+    const left = sleepT.end - Date.now();
+    const el = radio.st ? radio.el : audio;
+    if (left <= 30000 && left > 0) el.volume = Math.max(0, left / 30000);      // fondu sur les 30 dernières secondes
+    if (left <= 0) { audio.pause(); radio.el.pause(); clearSleep(); toast('Bonne nuit 🌙'); }
+    sleepBtn();
+  }, 1000);
+  toast('Arrêt dans ' + m + ' minutes'); sleepBtn();
+}
+function clearSleep() { clearInterval(sleepT.timer); sleepT.end = 0; sleepT.endOfTrack = false; audio.volume = 1; radio.el.volume = 1; sleepBtn(); }
+function sleepEnd() { if (!sleepT.endOfTrack) return false; clearSleep(); audio.pause(); toast('Bonne nuit 🌙'); updatePlayer(); return true; }
+function sleepBtn() {
+  const b = $('#full .sleep'); if (!b) return;
+  const left = sleepT.end ? Math.max(0, Math.ceil((sleepT.end - Date.now()) / 60000)) : 0;
+  b.textContent = sleepT.endOfTrack ? '⏾ fin' : sleepT.end ? '⏾ ' + left + ' min' : '⏾';
+  b.classList.toggle('on', !!(sleepT.end || sleepT.endOfTrack));
+}
+
+// ---------- Badges de format ----------
+function updateBadges(t) {
+  const box = $('#full .badges'); if (!box) return;
+  if (!t) { box.replaceChildren(); return; }
+  const ext = (t.name || '').split('.').pop().toLowerCase();
+  const fmtName = { mp3: 'MP3', m4a: 'AAC', aac: 'AAC', mp4: 'AAC', flac: 'FLAC', wav: 'WAV', aif: 'AIFF', aiff: 'AIFF', ogg: 'OGG', opus: 'OPUS' }[ext] || ext.toUpperCase();
+  const lossless = ['flac', 'wav', 'aif', 'aiff'].includes(ext);
+  const d = audio.duration;
+  const kbps = t.size && d ? Math.round(t.size * 8 / d / 1000) : 0;
+  const items = [fmtName, lossless ? 'Sans perte' : kbps ? kbps + ' kb/s' : '', 'Stéréo', offline.has(t.id) ? 'Hors ligne' : ''];
+  box.replaceChildren(...items.filter(Boolean).map((s, i) => h('span', { class: 'badge' + (i === 0 ? ' main' : '') }, s)));
+}
+audio.addEventListener('loadedmetadata', () => updateBadges(cur()));
+
+// ---------- Karaoké (atténuation de la voix au centre) ----------
+const kara = { on: false, ctx: null, src: null, sum: null };
+function karaoke() {
+  try {
+    if (!kara.ctx) {
+      const C = window.AudioContext || window.webkitAudioContext; kara.ctx = new C();
+      kara.src = kara.ctx.createMediaElementSource(audio);
+      const split = kara.ctx.createChannelSplitter(2), inv = kara.ctx.createGain(); inv.gain.value = -1;
+      kara.sum = kara.ctx.createGain(); kara.sum.channelCount = 1; kara.sum.channelCountMode = 'explicit';
+      split.connect(kara.sum, 0); split.connect(inv, 1); inv.connect(kara.sum); kara.split = split;
+      kara.sum.connect(kara.ctx.destination);
+    }
+    kara.ctx.resume();
+    kara.on = !kara.on;
+    kara.src.disconnect();
+    kara.src.connect(kara.on ? kara.split : kara.ctx.destination);
+    $('#full .kara').classList.toggle('on', kara.on);
+    toast(kara.on ? '🎤 Karaoké : voix atténuée (selon l\'enregistrement)' : 'Karaoké désactivé');
+    if (kara.on && $('#full .lyrics').hidden) $('#full .lyr').click();
+  } catch (e) { toast('Karaoké indisponible sur cet appareil'); }
+}
+
+// ---------- Commande vocale ----------
+function voice() {
+  const R = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!R) return toast('La commande vocale n\'est pas disponible dans ce navigateur.');
+  const r = new R(); r.lang = 'fr-CA'; r.interimResults = false; r.maxAlternatives = 1;
+  toast('🎙 Je t\'écoute… (ex. « joue Bob Marley », « pause », « suivant », « radio CKOI »)', 6000);
+  r.onresult = e => doVoice(e.results[0][0].transcript || '');
+  r.onerror = () => toast('Je n\'ai pas compris.');
+  r.start();
+}
+function doVoice(s) {
+  const t = fold(s).trim(); toast('« ' + s + ' »', 2000);
+  if (/^(pause|stop|arrete)/.test(t)) { audio.pause(); radio.el.pause(); return; }
+  if (/^(suivant|chanson suivante|next)/.test(t)) return next(true);
+  if (/^(precedent|chanson precedente)/.test(t)) return prev();
+  if (/^(reprend|lecture|play)$/.test(t)) return toggle();
+  let m = t.match(/^radio\s+(.+)/);
+  if (m) { go('radio'); radio.q = m[1]; return rbGet('/json/stations/search?name=' + encodeURIComponent(m[1]) + '&hidebroken=true&order=clickcount&reverse=true&limit=20').then(l => { const s2 = l.find(x => /^https:/.test(x.url_resolved || '')); s2 ? radioPlay(toStation(s2)) : toast('Radio introuvable'); }).catch(() => toast('Radio introuvable')); }
+  m = t.match(/^(joue|mets|lance|ecoute|fais jouer)\s+(.+)/);
+  const q = m ? m[2].replace(/^(l'album |l album |la chanson |le titre |du |de la |de |des )/, '') : t;
+  const ar = lib.artists.find(a => fold(a.name) === q) || lib.artists.find(a => fold(a.name).includes(q));
+  const al = lib.albums.find(a => fold(a.name) === q) || lib.albums.find(a => fold(a.name).includes(q));
+  const tr = lib.tracks.find(x => fold(x.title) === q) || lib.tracks.find(x => fold(x.title).includes(q));
+  if (m && tr && (!ar || fold(tr.title) === q)) return play([tr], 0);
+  if (m && ar) { const all = ar.albums.flatMap(a => a.tracks); P.shuffle = true; return play(all, Math.floor(Math.random() * all.length)); }
+  if (m && al) return play(al.tracks, 0);
+  $('#search').value = ui.q = s; ui.tab = 'songs'; ui.stack = []; render();
+}
+
+// ---------- Export M3U (clé USB de la voiture, VLC…) ----------
+function m3u(name, tracks) {
+  const safe = s => (s || '').replace(/\//g, '_');
+  const lines = ['#EXTM3U'];
+  for (const t of tracks) { if (t.local) continue; lines.push('#EXTINF:-1,' + t.artist + ' - ' + t.title); lines.push(safe(t.albumArtist || t.artist) + '/' + safe(t.album) + '/' + t.name); }
+  const a = h('a', { href: URL.createObjectURL(new Blob([lines.join('\r\n') + '\r\n'], { type: 'audio/x-mpegurl' })), download: name.replace(/[\\/:*?"<>|]/g, '_') + '.m3u8' });
+  document.body.append(a); a.click(); a.remove();
+  toast('Playlist exportée (à placer à la racine de la clé USB)');
+}
+
+// ---------- Télécommande entre appareils (même compte Google, via le dossier caché du Drive) ----------
+const rc = { id: store.get('devId', null), files: {}, lastCmd: store.get('rcLastCmd', 0), timer: 0, pubTimer: 0, devices: [], target: null, poll: 0 };
+if (!rc.id) { rc.id = Math.random().toString(36).slice(2, 10); store.set('devId', rc.id); }
+function devName() {
+  if (S.devName) return S.devName;
+  const u = navigator.userAgent;
+  return /iPhone/.test(u) ? 'iPhone' : /iPad|Macintosh.*Mobile/.test(u) || (/Macintosh/.test(u) && navigator.maxTouchPoints > 1) ? 'iPad' : /Android/.test(u) ? 'Android' : /Mac/.test(u) ? 'Mac' : /Windows/.test(u) ? 'PC' : 'Navigateur';
+}
+async function rcFile(name) {
+  if (rc.files[name]) return rc.files[name];
+  const f = await appData(name); rc.files[name] = f ? f.id : null; return rc.files[name];
+}
+function nowState() {
+  const t = cur();
+  if (radio.st) return { radio: radio.st.name, playing: !radio.el.paused };
+  return t ? { id: t.id, title: t.title, artist: t.artist, album: t.album, playing: !audio.paused, pos: audio.currentTime || 0, dur: audio.duration || 0, at: Date.now(),
+    queue: P.queue.slice(Math.max(0, P.i - 50), P.i + 200).map(x => x.id), qi: Math.min(P.i, 50) } : null;
+}
+function rcPublish(soon) {
+  if (S.remoteOff) return;
+  clearTimeout(rc.pubTimer); rc.pubTimer = setTimeout(async () => {
+    if (!hasToken() || document.visibilityState !== 'visible') return;
+    try { const name = 'bp-dev-' + rc.id + '.json'; rc.files[name] = await writeJson(name, { id: rc.id, name: devName(), who: sync.name, kind: 'pwa', at: Date.now(), now: nowState() }, await rcFile(name)); } catch { }
+  }, soon ? 300 : 2500);
+}
+async function rcPoll() {
+  if (S.remoteOff || !hasToken() || document.visibilityState !== 'visible') return;
+  try {
+    const id = await rcFile('bp-cmd-' + rc.id + '.json'); if (!id) return;
+    const cmds = await readJson(id);
+    const todo = (Array.isArray(cmds) ? cmds : []).filter(c => c.at > rc.lastCmd);
+    if (!todo.length) return;
+    for (const c of todo) { rc.lastCmd = Math.max(rc.lastCmd, c.at); runCmd(c); }
+    store.set('rcLastCmd', rc.lastCmd);
+    await writeJson('bp-cmd-' + rc.id + '.json', [], id);
+    rcPublish(true);
+  } catch { }
+}
+function runCmd(c) {
+  const a = c.arg;
+  switch (c.cmd) {
+    case 'toggle': radio.st ? (radio.el.paused ? radio.el.play() : radio.el.pause()) : toggle(); break;
+    case 'pause': audio.pause(); radio.el.pause(); break;
+    case 'next': next(true); break;
+    case 'prev': prev(); break;
+    case 'seek': audio.currentTime = Math.max(0, (audio.currentTime || 0) + (+a || 0)); break;
+    case 'vol': audio.volume = radio.el.volume = Math.max(0, Math.min(1, audio.volume + (+a || 0))); break;
+    case 'playIds': {
+      const list = (a.ids || []).map(id => lib.byId.get(id)).filter(Boolean);
+      if (!list.length) return toast('Ces titres ne sont pas dans la bibliothèque de cet appareil.');
+      radioStop(); P.shuffle = false; play(list, Math.min(a.i || 0, list.length - 1));
+      if (a.pos) audio.addEventListener('canplay', function f() { audio.removeEventListener('canplay', f); audio.currentTime = a.pos; }, { once: true });
+      toast('▶ Lecture reçue de ' + (c.from || 'un autre appareil')); break;
+    }
+  }
+}
+async function rcDevices() {
+  const j = await drive('files', { spaces: 'appDataFolder', q: "name contains 'bp-dev-' and trashed=false", fields: 'files(id,name,modifiedTime)', pageSize: 50 });
+  const fresh = (j.files || []).filter(f => Date.now() - Date.parse(f.modifiedTime) < 30 * 60000 && f.name !== 'bp-dev-' + rc.id + '.json');
+  const out = [];
+  for (const f of fresh) { try { const d = await readJson(f.id); d.seen = Date.parse(f.modifiedTime); out.push(d); } catch { } }
+  return out.sort((a, b) => b.seen - a.seen);
+}
+async function sendCmd(dev, cmd, arg) {
+  const name = 'bp-cmd-' + dev.id + '.json';
+  let id = await rcFile(name), list = [];
+  if (id) { try { list = await readJson(id); } catch { list = []; } }
+  list = (Array.isArray(list) ? list : []).filter(c => Date.now() - c.at < 120000);
+  list.push({ cmd, arg, at: Date.now(), from: devName() });
+  rc.files[name] = await writeJson(name, list, id);
+}
+async function remoteSheet() {
+  if (!hasToken() && !(await connect())) return;
+  sheet('Télécommande', [h('div', { class: 'muted small', style: 'padding:0 12px' }, 'Recherche de tes appareils…')]);
+  try {
+    rc.devices = await rcDevices();
+    const ago = d => Math.max(0, Math.round((Date.now() - d.seen) / 60000));
+    sheet('Contrôler un autre appareil', [
+      h('div', { class: 'muted small', style: 'padding:0 12px 8px' }, 'Appareils BossPlay ouverts avec ton compte Google (' + (sync.me?.email || '') + '). Cet appareil : ' + devName() + '.'),
+      ...(rc.devices.length ? rc.devices.map(d => ({ label: '📡 ' + d.name + (d.who ? ' (' + d.who + ')' : '') + ' — ' + (d.now ? (d.now.radio ? '📻 ' + d.now.radio : (d.now.playing ? '▶ ' : '⏸ ') + d.now.title) : 'à l\'arrêt') + (ago(d) > 2 ? ' · vu il y a ' + ago(d) + ' min' : ''), fn: () => remotePanel(d) }))
+        : [h('div', { style: 'padding:6px 12px' }, 'Aucun autre appareil trouvé. Ouvre BossPlay sur l\'autre appareil, avec le même compte Google.')]),
+    ]);
+  } catch (e) { sheet('Télécommande', [h('div', { style: 'padding:0 12px' }, 'Impossible : ' + e.message)]); }
+}
+function remotePanel(d) {
+  const n = d.now || {};
+  const btn = (label, cmd, arg) => h('button', { class: 'btn alt', onclick: async () => { try { await sendCmd(d, cmd, arg); toast('Envoyé à ' + d.name + ' (quelques secondes)'); } catch (e) { toast('Envoi impossible : ' + e.message); } } }, label);
+  sheet('📡 ' + d.name, [
+    h('div', { style: 'padding:0 12px 10px' }, h('b', null, n.radio ? '📻 ' + n.radio : n.title || 'À l\'arrêt'), n.artist ? h('div', { class: 'muted small' }, n.artist + ' — ' + n.album) : null),
+    h('div', { class: 'btns', style: 'padding:0 12px 10px' }, btn('⏮', 'prev'), btn('⏯', 'toggle'), btn('⏭', 'next'), btn('−15 s', 'seek', -15), btn('+15 s', 'seek', 15), btn('🔉', 'vol', -0.1), btn('🔊', 'vol', 0.1)),
+    cur() ? { label: '⇢ Envoyer ma musique sur ' + d.name, fn: async () => { const s = nowState(); await sendCmd(d, 'playIds', { ids: s.queue, i: s.qi, pos: s.pos }); audio.pause(); toast('Musique envoyée sur ' + d.name); } } : null,
+    n.queue ? { label: '⇠ Reprendre ici ce qui joue sur ' + d.name, fn: async () => {
+      const list = n.queue.map(id => lib.byId.get(id)).filter(Boolean); if (!list.length) return toast('Titres introuvables ici.');
+      radioStop(); P.shuffle = false; play(list, n.qi || 0);
+      const pos = (n.pos || 0) + (n.playing ? (Date.now() - (n.at || Date.now())) / 1000 : 0);
+      audio.addEventListener('canplay', function f() { audio.removeEventListener('canplay', f); audio.currentTime = pos; }, { once: true });
+      sendCmd(d, 'pause').catch(() => { });
+    } } : null,
+  ]);
+}
+setInterval(rcPoll, 4000);
+setInterval(() => rcPublish(), 60000);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { rcPublish(true); if (sync.admin) loadFamilyWishes(); } });
+setInterval(() => { if (sync.admin && document.visibilityState === 'visible') loadFamilyWishes(); }, 10 * 60000);
+
+function extrasSettings() {
+  const nm = h('input', { class: 'field', value: devName(), placeholder: 'Nom de cet appareil' });
+  return h('div', { class: 'card' }, h('h2', { style: 'margin-top:0' }, 'Télécommande et radio'),
+    h('div', { class: 'muted small' }, 'Nom de cet appareil (pour la télécommande) :'),
+    h('div', { class: 'row', style: 'margin:6px 0 10px' }, nm, h('button', { class: 'btn', onclick: () => { S.devName = nm.value.trim(); saveS(); rcPublish(true); toast('Nom enregistré'); } }, 'Enregistrer')),
+    h('div', { class: 'row' }, h('button', { class: 'pill' + (S.remoteOff ? '' : ' on'), onclick: () => { S.remoteOff = !S.remoteOff; saveS(); render(); } }, S.remoteOff ? 'Contrôle à distance : non' : 'Contrôle à distance : oui'),
+      h('button', { class: 'pill', onclick: remoteSheet }, '📡 Contrôler un autre appareil')),
+    h('p', { class: 'muted small' }, 'Fonctionne entre tes appareils connectés au même compte Google, quand BossPlay est ouvert à l\'écran (quelques secondes de délai).'),
+    playlists.length ? h('div', { class: 'btns' }, h('button', { class: 'pill', onclick: () => playlists.forEach(p => m3u(p.name, p.ids.map(id => lib.byId.get(id)).filter(Boolean))) }, 'Exporter mes playlists (M3U)')) : null);
+}
+
 // ---------- Démarrage ----------
 (async function start() {
   applyTheme();
@@ -1023,5 +1717,6 @@ $('#full .seek').addEventListener('change', e => { tick.drag = false; if (audio.
   if (raw && raw.rootId === S.rootId) buildLib(raw); else for (const t of localTracks) lib.byId.set(t.id, t);
   render(); banner();
   if (S.clientId) initAuth();
+  if (hasToken()) whoAmI();
   if (S.rootId && hasToken() && !raw) scan();
 })();

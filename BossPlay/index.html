@@ -20,6 +20,9 @@
     <button id="back" class="icon" aria-label="Retour" hidden>‹</button>
     <div class="brand"><span class="logo">▶</span><span>BossPlay</span></div>
     <input id="search" type="search" placeholder="Rechercher" autocomplete="off">
+    <button id="mic" class="icon" aria-label="Commande vocale">🎙</button>
+    <button id="remote" class="icon" aria-label="Télécommande">📡</button>
+    <button id="who" class="pill" hidden></button>
     <button id="theme" class="icon" aria-label="Thème jour/nuit">◐</button>
   </header>
   <div id="banner" hidden></div>
@@ -29,6 +32,9 @@
     <button data-tab="songs">Chansons</button>
     <button data-tab="favs">Favoris</button>
     <button data-tab="playlists">Playlists</button>
+    <button data-tab="radio">Radio</button>
+    <button data-tab="wishes">Envies</button>
+    <button data-tab="stats">Écoutes</button>
     <button data-tab="settings">Réglages</button>
   </nav>
   <main id="view"></main>
@@ -53,6 +59,7 @@
       <div class="title"></div>
       <div class="artist link"></div>
       <div class="album link"></div>
+      <div class="badges"></div>
       <input class="seek" type="range" min="0" max="1000" value="0">
       <div class="times"><span class="cur">0:00</span><span class="dur">0:00</span></div>
       <div class="controls">
@@ -66,6 +73,8 @@
         <button class="pill lyr">Paroles</button>
         <button class="pill clip">🎬 Clip</button>
         <button class="pill fav">♡ Favori</button>
+        <button class="pill kara">🎤 Karaoké</button>
+        <button class="pill sleep">⏾</button>
         <button class="pill more">⋯</button>
       </div>
       <div class="err"></div>
