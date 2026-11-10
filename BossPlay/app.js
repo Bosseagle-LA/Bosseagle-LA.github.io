@@ -2,7 +2,7 @@
    Paroles : LRCLIB. Clips : YouTube (lecteur officiel intégré, ou l'appli YouTube / YouTube Music). */
 'use strict';
 
-const VERSION = '1.3';
+const VERSION = '1.3.1';
 const YT_KEY = 'AIzaSyDoAxJzDHTkIPDqZbVcLr2Aguu40kPZqio';            // clé « BossPlayPWA » (limitée à bosseagle-la.github.io)
 // Lecture de la musique + dossier caché de BossPlay (profil de chacun) + fichiers créés par BossPlay (index de la bibliothèque).
 const SCOPE = 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file';
@@ -1426,6 +1426,16 @@ const buyLinks = w => {
     h('a', { class: 'pill', href: 'https://www.amazon.ca/s?k=' + q + '&i=digital-music', target: '_blank', rel: 'noopener' }, 'Amazon'),
     h('a', { class: 'pill', href: 'https://www.youtube.com/results?search_query=' + q, target: '_blank', rel: 'noopener' }, 'YouTube')];
 };
+function copyWish(w) {
+  const t = [w.title, w.artist].filter(Boolean).join(' – ') || w.station || '';
+  const done = () => toast('Copié : ' + t);
+  if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(t).then(done).catch(() => fallbackCopy(t, done));
+  fallbackCopy(t, done);
+}
+function fallbackCopy(t, done) {
+  const ta = h('textarea', { style: 'position:fixed;top:-1000px' }); ta.value = t; document.body.append(ta); ta.select();
+  try { document.execCommand('copy'); done(); } catch { toast('Copie impossible'); } ta.remove();
+}
 function wishRow(w, mine) {
   const done = !!X.bought[w.id];
   return h('div', { class: 'card wishc' + (done ? ' done' : '') },
@@ -1434,7 +1444,7 @@ function wishRow(w, mine) {
       w.who ? h('span', { class: 'pill on' }, w.who) : null),
     h('div', { class: 'muted small' }, [w.station ? '📻 ' + w.station : '', when(w.at)].filter(Boolean).join(' · ')),
     w.note ? h('div', { class: 'small' }, '« ' + w.note + ' »') : null,
-    h('div', { class: 'row', style: 'margin-top:8px' }, ...(sync.admin ? buyLinks(w) : []),
+    h('div', { class: 'row', style: 'margin-top:8px' }, h('button', { class: 'pill', onclick: () => copyWish(w) }, '📋 Copier'), ...(sync.admin ? buyLinks(w) : []),
       sync.admin ? h('button', { class: 'pill' + (done ? ' on' : ''), onclick: () => { if (done) delete X.bought[w.id]; else X.bought[w.id] = Date.now(); saveX(); render(); } }, done ? '✓ Acheté' : 'Marquer acheté') : null,
       mine ? h('button', { class: 'pill', onclick: () => delWish(w) }, 'Retirer') : null));
 }
@@ -1604,11 +1614,19 @@ async function rcFile(name) {
   if (rc.files[name]) return rc.files[name];
   const f = await appData(name); rc.files[name] = f ? f.id : null; return rc.files[name];
 }
+const pathOf = t => [(t.albumArtist || t.artist || '').replace(/\//g, '_'), (t.album || '').replace(/\//g, '_'), t.name].join('/');
+let pathMap = null, pathFor = null;
+function byPath(p) {
+  if (pathFor !== lib) { pathFor = lib; pathMap = new Map(); for (const t of lib.tracks) { const parts = pathOf(t).split('/').map(fold); pathMap.set(parts.join('/'), t); if (!pathMap.has(parts.slice(1).join('/'))) pathMap.set(parts.slice(1).join('/'), t); } }
+  const parts = String(p || '').split('/').filter(Boolean).map(fold);
+  return pathMap.get(parts.slice(-3).join('/')) || pathMap.get(parts.slice(-2).join('/')) || null;
+}
+const resolveList = (ids, paths) => { const a = (ids || []).map(id => lib.byId.get(id)).filter(Boolean); return a.length ? a : (paths || []).map(byPath).filter(Boolean); };
 function nowState() {
   const t = cur();
   if (radio.st) return { radio: radio.st.name, playing: !radio.el.paused };
   return t ? { id: t.id, title: t.title, artist: t.artist, album: t.album, playing: !audio.paused, pos: audio.currentTime || 0, dur: audio.duration || 0, at: Date.now(),
-    queue: P.queue.slice(Math.max(0, P.i - 50), P.i + 200).map(x => x.id), qi: Math.min(P.i, 50) } : null;
+    queue: P.queue.slice(Math.max(0, P.i - 50), P.i + 200).map(x => x.id), paths: P.queue.slice(Math.max(0, P.i - 50), P.i + 200).map(pathOf), qi: Math.min(P.i, 50) } : null;
 }
 function rcPublish(soon) {
   if (S.remoteOff) return;
@@ -1640,7 +1658,7 @@ function runCmd(c) {
     case 'seek': audio.currentTime = Math.max(0, (audio.currentTime || 0) + (+a || 0)); break;
     case 'vol': audio.volume = radio.el.volume = Math.max(0, Math.min(1, audio.volume + (+a || 0))); break;
     case 'playIds': {
-      const list = (a.ids || []).map(id => lib.byId.get(id)).filter(Boolean);
+      const list = resolveList(a.ids, a.paths);
       if (!list.length) return toast('Ces titres ne sont pas dans la bibliothèque de cet appareil.');
       radioStop(); P.shuffle = false; play(list, Math.min(a.i || 0, list.length - 1));
       if (a.pos) audio.addEventListener('canplay', function f() { audio.removeEventListener('canplay', f); audio.currentTime = a.pos; }, { once: true });
@@ -1682,9 +1700,9 @@ function remotePanel(d) {
   sheet('📡 ' + d.name, [
     h('div', { style: 'padding:0 12px 10px' }, h('b', null, n.radio ? '📻 ' + n.radio : n.title || 'À l\'arrêt'), n.artist ? h('div', { class: 'muted small' }, n.artist + ' — ' + n.album) : null),
     h('div', { class: 'btns', style: 'padding:0 12px 10px' }, btn('⏮', 'prev'), btn('⏯', 'toggle'), btn('⏭', 'next'), btn('−15 s', 'seek', -15), btn('+15 s', 'seek', 15), btn('🔉', 'vol', -0.1), btn('🔊', 'vol', 0.1)),
-    cur() ? { label: '⇢ Envoyer ma musique sur ' + d.name, fn: async () => { const s = nowState(); await sendCmd(d, 'playIds', { ids: s.queue, i: s.qi, pos: s.pos }); audio.pause(); toast('Musique envoyée sur ' + d.name); } } : null,
-    n.queue ? { label: '⇠ Reprendre ici ce qui joue sur ' + d.name, fn: async () => {
-      const list = n.queue.map(id => lib.byId.get(id)).filter(Boolean); if (!list.length) return toast('Titres introuvables ici.');
+    cur() ? { label: '⇢ Envoyer ma musique sur ' + d.name, fn: async () => { const s = nowState(); await sendCmd(d, 'playIds', { ids: s.queue, paths: s.paths, i: s.qi, pos: s.pos }); audio.pause(); toast('Musique envoyée sur ' + d.name); } } : null,
+    n.queue || n.paths ? { label: '⇠ Reprendre ici ce qui joue sur ' + d.name, fn: async () => {
+      const list = resolveList(n.queue, n.paths); if (!list.length) return toast('Titres introuvables ici.');
       radioStop(); P.shuffle = false; play(list, n.qi || 0);
       const pos = (n.pos || 0) + (n.playing ? (Date.now() - (n.at || Date.now())) / 1000 : 0);
       audio.addEventListener('canplay', function f() { audio.removeEventListener('canplay', f); audio.currentTime = pos; }, { once: true });
