@@ -1255,21 +1255,34 @@ function tvAddr(ask) {
 }
 function tvSend(q) {
   const a = tvAddr(false); if (!a) return;
-  // Page https → télé en http : seul un nouvel onglet est permis par le navigateur.
-  window.open('http://' + a + '/?q=' + encodeURIComponent(q), '_blank');
+  // Page https → télé en http : on ouvre la page de la télé dans cette fenêtre (les fenêtres surgissantes
+  // sont souvent bloquées, surtout dans l'appli installée sur l'écran d'accueil).
+  toast('📺 Envoi à la télé : ' + q, 2500);
+  location.href = 'http://' + a + '/?q=' + encodeURIComponent(q);
 }
+let tvBusy = false;
 function tvSearch() {
   const typed = $('#search').value.trim();
   if (typed) return tvSend(typed);
+  if (tvBusy) return;
   const R = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!R) { const q = (prompt('Chercher sur la télé :') || '').trim(); if (q) tvSend(q); return; }
-  const a = tvAddr(false); if (!a) return;
-  const w = window.open('about:blank', '_blank');   // ouvert pendant le toucher, sinon bloqué
-  const r = new R(); r.lang = 'fr-CA'; r.interimResults = false; r.maxAlternatives = 1;
-  toast('📺 Dis un artiste, un album ou une chanson…', 6000);
-  r.onresult = e => { const q = (e.results[0][0].transcript || '').trim(); const u = 'http://' + a + '/?q=' + encodeURIComponent(q); if (w) w.location = u; else location.href = u; };
-  r.onerror = () => { if (w) w.close(); toast('Je n\'ai pas compris.'); };
-  r.start();
+  const ask = () => { const q = (prompt('Chercher sur la télé (tu peux utiliser le micro du clavier) :') || '').trim(); if (q) tvSend(q); };
+  if (!R) return ask();
+  if (!tvAddr(false)) return;
+  let done = false;
+  const r = new R(); r.lang = 'fr-CA'; r.interimResults = false; r.maxAlternatives = 1; r.continuous = false;
+  const stop = () => { tvBusy = false; $('#tvsearch').classList.remove('on'); };
+  r.onstart = () => toast('📺 Je t\'écoute… dis un artiste, un album ou une chanson', 7000);
+  r.onresult = e => { done = true; stop(); const q = (e.results[0][0].transcript || '').trim(); if (q) tvSend(q); else toast('Je n\'ai rien entendu.'); };
+  r.onerror = e => {
+    done = true; stop();
+    if (e.error === 'not-allowed' || e.error === 'service-not-allowed') { toast('Micro refusé : autorise-le pour ce site, ou tape ta recherche.', 4000); ask(); }
+    else if (e.error === 'no-speech') toast('Je n\'ai rien entendu : touche 📺 et parle tout de suite.', 3500);
+    else { toast('Dictée indisponible (' + e.error + ') : tape ta recherche.', 3500); ask(); }
+  };
+  r.onend = () => { if (!done) { stop(); toast('Je n\'ai rien entendu : réessaie.', 2500); } };
+  try { tvBusy = true; $('#tvsearch').classList.add('on'); r.start(); }
+  catch (e) { stop(); ask(); }
 }
 $('#tvsearch').onclick = tvSearch;
 $('#tvsearch').oncontextmenu = e => { e.preventDefault(); tvAddr(true); };

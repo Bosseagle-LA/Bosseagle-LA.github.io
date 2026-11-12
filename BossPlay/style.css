@@ -154,3 +154,12 @@ h2{font-size:17px;margin:20px 0 10px}
 #full .badge{font-size:11px;font-weight:800;letter-spacing:.04em;padding:3px 8px;border-radius:6px;border:1px solid currentColor;opacity:.8}
 #full .badge.main{background:var(--accent);border-color:var(--accent);color:#fff;opacity:1}
 @media (max-width:440px){ #top{gap:4px} #top .icon{padding:4px;font-size:18px} #search{min-width:0;width:auto;flex:1} .brand span:last-child{display:none} }
+
+/* Radio dans le lecteur (barre du bas et « En lecture ») */
+#mini.rmode .prev,#mini.rmode .next{display:none}
+#full.rmode .shuffle,#full.rmode .repeat,#full.rmode .prev,#full.rmode .next,#full.rmode .seek,#full.rmode .times,#full.rmode .lyr,#full.rmode .clip,#full.rmode .fav,#full.rmode .kara,#full.rmode .more,#full.rmode .badges{display:none}
+#mini .rwish{color:var(--red)}
+#full .pill.rwish{background:var(--red);color:#fff}
+.rlogo{display:grid;place-items:center;width:100%;height:100%;font-size:34px}
+
+#tvsearch.on{background:#1db954;color:#fff;border-radius:10px}
