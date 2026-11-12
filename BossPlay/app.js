@@ -2,7 +2,7 @@
    Paroles : LRCLIB. Clips : YouTube (lecteur officiel intégré, ou l'appli YouTube / YouTube Music). */
 'use strict';
 
-const VERSION = '1.3.1';
+const VERSION = '1.3.2';
 const YT_KEY = 'AIzaSyDoAxJzDHTkIPDqZbVcLr2Aguu40kPZqio';            // clé « BossPlayPWA » (limitée à bosseagle-la.github.io)
 // Lecture de la musique + dossier caché de BossPlay (profil de chacun) + fichiers créés par BossPlay (index de la bibliothèque).
 const SCOPE = 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file';
@@ -569,6 +569,7 @@ function prev() {
   if (P.i > 0) { P.i--; load(); }
 }
 function toggle() {
+  if (radio.st) { if (radio.el.paused) radio.el.play().catch(() => { }); else radio.el.pause(); return; }
   if (!cur()) return;
   if (audio.paused) { if (!audio.src) load(); else audio.play().catch(() => { }); } else audio.pause();
 }
@@ -591,11 +592,12 @@ function setSession(t) {
 if ('mediaSession' in navigator) {
   const ms = navigator.mediaSession;
   const set = (a, f) => { try { ms.setActionHandler(a, f); } catch { } };
-  set('play', () => clip.on && clip.has ? ytCmd('playVideo') : audio.play());
-  set('pause', () => clip.on && clip.has ? ytCmd('pauseVideo') : audio.pause());
-  set('previoustrack', prev);
-  set('nexttrack', () => next(true));
-  set('seekto', d => { if (d.seekTime != null) audio.currentTime = d.seekTime; });
+  set('play', () => radio.st ? radio.el.play() : clip.on && clip.has ? ytCmd('playVideo') : audio.play());
+  set('pause', () => radio.st ? radio.el.pause() : clip.on && clip.has ? ytCmd('pauseVideo') : audio.pause());
+  set('stop', () => radio.st ? radioStop() : audio.pause());
+  set('previoustrack', () => { if (!radio.st) prev(); });
+  set('nexttrack', () => { if (!radio.st) next(true); });
+  set('seekto', d => { if (!radio.st && d.seekTime != null) audio.currentTime = d.seekTime; });
 }
 
 // ---------- Interface ----------
@@ -794,9 +796,44 @@ function coverInto(el, t) {
   el.firstChild.style.width = '100%'; el.firstChild.style.height = '100%';
 }
 let lastCoverFor = null;
+// La radio utilise le même lecteur (barre du bas et fenêtre « En lecture ») que les titres de musique.
+function radioBtns(on) {
+  const d = on ? '' : 'none';
+  $('#mini .stop').style.display = d; $('#mini .rwish').style.display = d;
+  $('#full .rstop').style.display = d; $('#full .rwish').style.display = d;
+}
+function updateRadioPlayer() {
+  const st = radio.st, playing = !radio.el.paused;
+  document.querySelectorAll('#mini,#full').forEach(e => e.classList.add('rmode'));
+  radioBtns(true);
+  $('#mini').hidden = false;
+  $('#mini .t').textContent = st.name;
+  $('#mini .s').textContent = playing ? '📻 EN DIRECT' : 'Radio en pause';
+  $('#mini .play').textContent = playing ? '⏸' : '▶';
+  $('#full .play').textContent = playing ? '⏸' : '▶';
+  $('#full .title').textContent = st.name;
+  $('#full .artist').textContent = playing ? '📻 EN DIRECT' : 'Radio en pause';
+  $('#full .album').textContent = st.tags || '';
+  $('#full .err').textContent = '';
+  $('#mini .fill').style.width = '0';
+  $('#full .lyrics').hidden = true; $('#full .cover').hidden = false; $('#full .lyr').classList.remove('on');
+  if (lastCoverFor !== 'radio:' + st.id) {
+    lastCoverFor = 'radio:' + st.id;
+    for (const el of [$('#mini .art'), $('#full .cover')]) {
+      el.replaceChildren(st.favicon
+        ? h('img', { src: st.favicon, alt: '', style: 'width:100%;height:100%;object-fit:contain', onerror: e => e.target.replaceWith(h('span', { class: 'rlogo' }, '📻')) })
+        : h('span', { class: 'rlogo' }, '📻'));
+    }
+    $('#full .bg').style.backgroundImage = '';
+  }
+  sleepBtn(); rcPublish();
+}
 function updatePlayer() {
+  if (radio.st) return updateRadioPlayer();
+  document.querySelectorAll('#mini,#full').forEach(e => e.classList.remove('rmode'));
+  radioBtns(false);
   const t = cur(); $('#mini').hidden = !t;
-  if (!t) return;
+  if (!t) { $('#full').hidden = true; return; }
   $('#mini .t').textContent = t.title;
   $('#mini .s').textContent = P.error || (ui.loading ? 'Chargement…' : t.artist + ' — ' + t.album);
   const playing = !audio.paused;
@@ -1207,6 +1244,35 @@ $('#full .clip').onclick = openClip;
 $('#full .sleep').onclick = sleepSheet;
 $('#full .kara').onclick = karaoke;
 $('#mic').onclick = voice;
+// 📺 Recherche envoyée à BossPlay TV (Fire TV, même Wi-Fi) : le texte du champ, sinon une dictée.
+function tvAddr(ask) {
+  let a = store.get('tvAddr', '');
+  if (!a || ask) {
+    a = (prompt('Adresse affichée sur la télé, dans Recherche (ex. 192.168.6.69:8765)', a || '192.168.6.69:8765') || '').trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+    if (a) store.set('tvAddr', a);
+  }
+  return a;
+}
+function tvSend(q) {
+  const a = tvAddr(false); if (!a) return;
+  // Page https → télé en http : seul un nouvel onglet est permis par le navigateur.
+  window.open('http://' + a + '/?q=' + encodeURIComponent(q), '_blank');
+}
+function tvSearch() {
+  const typed = $('#search').value.trim();
+  if (typed) return tvSend(typed);
+  const R = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!R) { const q = (prompt('Chercher sur la télé :') || '').trim(); if (q) tvSend(q); return; }
+  const a = tvAddr(false); if (!a) return;
+  const w = window.open('about:blank', '_blank');   // ouvert pendant le toucher, sinon bloqué
+  const r = new R(); r.lang = 'fr-CA'; r.interimResults = false; r.maxAlternatives = 1;
+  toast('📺 Dis un artiste, un album ou une chanson…', 6000);
+  r.onresult = e => { const q = (e.results[0][0].transcript || '').trim(); const u = 'http://' + a + '/?q=' + encodeURIComponent(q); if (w) w.location = u; else location.href = u; };
+  r.onerror = () => { if (w) w.close(); toast('Je n\'ai pas compris.'); };
+  r.start();
+}
+$('#tvsearch').onclick = tvSearch;
+$('#tvsearch').oncontextmenu = e => { e.preventDefault(); tvAddr(true); };
 $('#remote').onclick = remoteSheet;
 $('#full .lyr').onclick = () => {
   const box = $('#full .lyrics'), cov = $('#full .cover');
@@ -1304,19 +1370,15 @@ function radioPlay(st) {
   try { fetch(RB[0] + '/json/url/' + st.id).catch(() => { }); } catch { }
   render(); radioBar();
 }
-function radioStop() { if (!radio.st) return; radio.el.pause(); radio.el.removeAttribute('src'); radio.el.load(); radio.st = null; radioBar(); if (ui.tab === 'radio') render(); }
-radio.el.addEventListener('pause', radioBar); radio.el.addEventListener('play', radioBar);
-function radioBar() {
-  let b = $('#radiobar');
-  if (!radio.st) { if (b) b.remove(); return; }
-  if (!b) { b = h('div', { id: 'radiobar' }); $('#app').insertBefore(b, $('#mini')); }
-  b.replaceChildren(
-    radio.st.favicon ? h('img', { src: radio.st.favicon, alt: '', onerror: e => e.target.remove() }) : h('span', { class: 'rlogo' }, '📻'),
-    h('div', { class: 'm' }, h('div', { class: 't' }, radio.st.name), h('div', { class: 's' }, radio.el.paused ? 'En pause' : 'En direct')),
-    h('button', { class: 'pill wish', onclick: () => wishSheet() }, '♥ Retenir ce titre'),
-    h('button', { class: 'icon', onclick: () => radio.el.paused ? radio.el.play() : radio.el.pause() }, radio.el.paused ? '▶' : '⏸'),
-    h('button', { class: 'icon', onclick: radioStop }, '⏹'));
+function radioStop() {
+  if (!radio.st && radio.el.paused && !radio.el.getAttribute('src')) return;
+  radio.el.pause(); radio.el.removeAttribute('src'); radio.el.load(); radio.st = null;
+  lastCoverFor = null; updatePlayer(); if (ui.tab === 'radio') render();
 }
+radio.el.addEventListener('pause', radioBar); radio.el.addEventListener('play', radioBar);
+function radioBar() { updatePlayer(); }
+$('#mini .stop').onclick = $('#full .rstop').onclick = radioStop;
+$('#mini .rwish').onclick = $('#full .rwish').onclick = () => wishSheet();
 const isFavRadio = st => X.radios.some(r => r.id === st.id);
 function favRadio(st) {
   if (isFavRadio(st)) { X.radios = X.radios.filter(r => r.id !== st.id); X.radiosDel[st.id] = Date.now(); toast('Retirée de mes radios'); }

@@ -21,6 +21,7 @@
     <div class="brand"><span class="logo">▶</span><span>BossPlay</span></div>
     <input id="search" type="search" placeholder="Rechercher" autocomplete="off">
     <button id="mic" class="icon" aria-label="Commande vocale">🎙</button>
+    <button id="tvsearch" class="icon" aria-label="Chercher sur la télé">📺</button>
     <button id="remote" class="icon" aria-label="Télécommande">📡</button>
     <button id="who" class="pill" hidden></button>
     <button id="theme" class="icon" aria-label="Thème jour/nuit">◐</button>
@@ -43,9 +44,11 @@
     <div class="row">
       <div class="art"></div>
       <div class="meta"><div class="t"></div><div class="s"></div></div>
+      <button class="icon rwish" style="display:none" aria-label="Retenir ce titre">♥</button>
       <button class="icon prev" aria-label="Précédent">⏮</button>
       <button class="icon play big" aria-label="Lecture">▶</button>
       <button class="icon next" aria-label="Suivant">⏭</button>
+      <button class="icon stop" style="display:none" aria-label="Arrêter la radio">⏹</button>
     </div>
   </div>
 </div>
@@ -76,6 +79,8 @@
         <button class="pill kara">🎤 Karaoké</button>
         <button class="pill sleep">⏾</button>
         <button class="pill more">⋯</button>
+        <button class="pill rwish" style="display:none">♥ Retenir ce titre</button>
+        <button class="pill rstop" style="display:none">⏹ Arrêter la radio</button>
       </div>
       <div class="err"></div>
     </div>
