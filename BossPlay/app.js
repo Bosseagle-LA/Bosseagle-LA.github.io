@@ -41,7 +41,7 @@ const store = {
 // Base IndexedDB (bibliothèque, paroles) : clé → valeur.
 const idb = {
   _p: null,
-  openPage() {
+  open() {
     return this._p || (this._p = new Promise((res, rej) => {
       const r = indexedDB.open('bossplay', 1);
       r.onupgradeneeded = () => r.result.createObjectStore('kv');
@@ -355,9 +355,12 @@ async function scan(full = false) {
   if (!full && !sync.admin && await loadIndex()) return;
   try {
     setStatus('Lecture de Google Drive…');
-    const folders = await listAll("mimeType='application/vnd.google-apps.folder' and trashed=false", 'files(id,name,parents)');
-    const audio = await listAll("mimeType contains 'audio/' and trashed=false", 'files(id,name,parents,size,mimeType)');
-    const images = await listAll("mimeType contains 'image/' and trashed=false", 'files(id,name,parents)');
+    // Les trois listes en même temps (au lieu de l'une après l'autre).
+    const [folders, audio, images] = await Promise.all([
+      listAll("mimeType='application/vnd.google-apps.folder' and trashed=false", 'files(id,name,parents)'),
+      listAll("mimeType contains 'audio/' and trashed=false", 'files(id,name,parents,size,mimeType)'),
+      listAll("mimeType contains 'image/' and trashed=false", 'files(id,name,parents)'),
+    ]);
     const fmap = new Map(folders.map(f => [f.id, f]));
     const under = new Map();
     const inRoot = id => {
@@ -1805,6 +1808,8 @@ function extrasSettings() {
 (async function start() {
   applyTheme();
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => { });
+  // Demande au navigateur de ne pas effacer la bibliothèque gardée sur l'appareil.
+  try { navigator.storage?.persist?.(); } catch { }
   for (const t of store.get('localIndex', [])) localTracks.push(Object.assign({}, t));
   const raw = await idb.get('library');
   if (raw && raw.rootId === S.rootId) buildLib(raw); else for (const t of localTracks) lib.byId.set(t.id, t);
