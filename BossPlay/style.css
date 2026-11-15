@@ -17,7 +17,19 @@ input{font:inherit;color:inherit}
 #app{display:flex;flex-direction:column;height:100%}
 #top{display:flex;align-items:center;gap:10px;padding:calc(10px + var(--safe-t)) 14px 8px;background:var(--panel);border-bottom:1px solid var(--line)}
 .brand{display:flex;align-items:center;gap:8px;font-weight:800;font-size:18px;white-space:nowrap}
-.logo{display:inline-grid;place-items:center;width:28px;height:28px;border-radius:8px;background:var(--accent);color:#fff;font-size:13px}
+.logo{width:32px;height:32px;border-radius:8px;object-fit:contain}
+.who-title{display:flex;align-items:center;justify-content:center;gap:8px}
+.who-title img{height:34px}
+.who-row{display:flex;justify-content:center;gap:14px;flex-wrap:wrap;padding:6px 12px 10px}
+.who-p{display:flex;flex-direction:column;align-items:center;gap:6px;background:none;border:0;color:inherit;font:inherit;cursor:pointer}
+.av{width:64px;height:64px;border-radius:50%;object-fit:cover;background:var(--line);display:grid;place-items:center;font-weight:800;font-size:24px}
+.av.sm{width:26px;height:26px;font-size:12px}
+.who-p.on .av{outline:3px solid var(--accent);outline-offset:2px}
+.gal{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;padding:6px 12px 12px;max-height:55vh;overflow:auto}
+.gal button{padding:0;border:0;background:none;border-radius:50%;aspect-ratio:1}
+.gal img{width:100%;height:100%;border-radius:50%;object-fit:cover}
+.gal button.on img{outline:3px solid var(--accent);outline-offset:2px}
+#who:not([hidden]){display:inline-flex;align-items:center;gap:6px}
 #search{flex:1;min-width:0;padding:8px 12px;border-radius:10px;border:1px solid var(--line);background:var(--panel2)}
 .icon{font-size:20px;padding:6px 8px;border-radius:10px;line-height:1}
 .icon:active{background:var(--panel2)}
@@ -152,6 +164,8 @@ h2{font-size:17px;margin:20px 0 10px}
 .stat b{font-size:22px}
 #full .badges{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 2px}
 #full .badge{font-size:11px;font-weight:800;letter-spacing:.04em;padding:3px 8px;border-radius:6px;border:1px solid currentColor;opacity:.8}
+#full .badges{align-items:center}
+#full .badge-img{height:20px;width:auto}
 #full .badge.main{background:var(--accent);border-color:var(--accent);color:#fff;opacity:1}
 @media (max-width:440px){ #top{gap:4px} #top .icon{padding:4px;font-size:18px} #search{min-width:0;width:auto;flex:1} .brand span:last-child{display:none} }
 

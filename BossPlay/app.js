@@ -190,20 +190,128 @@ async function whoAmI() {
       store.set('admin', sync.admin);
     }
     await pull();
+    avLoad(false);
     if (!sync.name) pickProfile();
-    if (sync.admin) loadFamilyWishes();
+    else if (sync.name === 'Boss' && sync.admin && !bossOk) enterBoss();
+    if (isBoss()) loadFamilyWishes();
     rcPublish(true);
     render();
   } catch (e) { if (e.message !== 'auth') { sync.error = e.message; } }
 }
+// Profil Boss protégé par un code (4 à 6 chiffres), propre à cet appareil, gardé chiffré (empreinte SHA-256).
+// Les droits d'administration ne valent que dans le profil Boss, même sur le compte Google de Boss.
+// Le code n'est demandé que lorsqu'on passe d'un autre profil à Boss ; l'appareil de Boss reste ouvert.
+let bossOk = localStorage.getItem('bossOk') === '1';
+const isBoss = () => sync.admin && sync.name === 'Boss' && bossOk;
+async function pinHash(code) {
+  const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('bossplay:' + code));
+  return [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, '0')).join('');
+}
+function pinDialog(title, sub, onCode) {
+  const inp = h('input', { type: 'password', inputmode: 'numeric', pattern: '[0-9]*', autocomplete: 'off', maxlength: '6', placeholder: '••••',
+    style: 'font-size:28px;letter-spacing:10px;text-align:center;width:100%;box-sizing:border-box;padding:12px;border-radius:14px' });
+  const ok = () => { const c = inp.value.replace(/\D/g, ''); if (c.length < 4) { toast('4 à 6 chiffres'); inp.focus(); return; } $('#sheet').hidden = true; onCode(c); };
+  inp.addEventListener('keydown', e => { if (e.key === 'Enter') ok(); });
+  sheet(title, [
+    h('div', { class: 'muted small', style: 'padding:0 12px 8px' }, sub),
+    h('div', { style: 'padding:0 12px 10px' }, inp),
+    h('button', { class: 'it', onclick: ok }, 'Valider'),
+  ]);
+  setTimeout(() => inp.focus(), 80);
+}
+function enterBoss() {
+  const saved = store.get('bossPin', '');
+  const become = () => { bossOk = true; localStorage.setItem('bossOk', '1'); sync.name = 'Boss'; store.set('profileName', 'Boss'); markDirty(); render(); toast('Bonjour Boss !'); };
+  if (!saved) {
+    return pinDialog('Créer le code de Boss', 'Ce code sera demandé chaque fois qu\'on choisit le profil Boss sur cet appareil.', c1 =>
+      pinDialog('Confirmer le code', 'Retape le même code.', async c2 => {
+        if (c1 !== c2) { toast('Les deux codes sont différents.'); return enterBoss(); }
+        store.set('bossPin', await pinHash(c1)); become();
+      }));
+  }
+  let tries = store.get('bossPinTries', 0), until = store.get('bossPinUntil', 0);
+  if (Date.now() < until) { toast('Trop d\'essais : réessaie dans ' + Math.ceil((until - Date.now()) / 60000) + ' min.'); return; }
+  pinDialog('Code de Boss', 'Profil administrateur protégé.', async c => {
+    if (await pinHash(c) === saved) { store.set('bossPinTries', 0); become(); return; }
+    tries++; store.set('bossPinTries', tries);
+    if (tries >= 5) { store.set('bossPinUntil', Date.now() + 5 * 60000); store.set('bossPinTries', 0); toast('Code faux : profil Boss bloqué 5 minutes.'); }
+    else toast('Code faux (' + (5 - tries) + ' essai(s) restant(s)).');
+  });
+}
+// ---------- Avatars (Google Drive › BossPlay › Avatars) ----------
+const AV = { names: [], urls: {}, folder: null, choicesId: null, picks: store.get('avPicks', {}), loading: false };
+async function avFolder() {
+  if (AV.folder) return AV.folder;
+  const base = "name='Avatars' and mimeType='application/vnd.google-apps.folder' and trashed=false";
+  let j = S.rootId ? await drive('files', { q: base + ` and '${S.rootId}' in parents`, fields: 'files(id)', supportsAllDrives: true, includeItemsFromAllDrives: true }) : null;
+  if (!j?.files?.length) j = await drive('files', { q: base, fields: 'files(id)', supportsAllDrives: true, includeItemsFromAllDrives: true });
+  AV.folder = j.files?.[0]?.id || null;
+  return AV.folder;
+}
+async function avLoad(say) {
+  if (AV.loading || !hasToken()) return;
+  AV.loading = true;
+  try {
+    const fid = await avFolder();
+    if (!fid) { if (say) toast('Dossier « Avatars » introuvable dans Google Drive'); return; }
+    const j = await drive('files', { q: `'${fid}' in parents and trashed=false`, fields: 'files(id,name,mimeType,size)', pageSize: 500, supportsAllDrives: true, includeItemsFromAllDrives: true });
+    const files = j.files || [];
+    const ch = files.find(f => f.name === 'bossplay-avatars.json');
+    AV.choicesId = ch?.id || null;
+    if (ch) { try { const r = await gfetch('https://www.googleapis.com/drive/v3/files/' + ch.id + '?alt=media&supportsAllDrives=true'); const o = await r.json();
+      for (const k in o) if (!AV.picks[k] || (o[k].at || 0) > (AV.picks[k].at || 0)) AV.picks[k] = o[k]; store.set('avPicks', AV.picks); } catch { } }
+    const imgs = files.filter(f => (f.mimeType || '').startsWith('image/'))
+      .sort((a, b) => (parseInt(a.name) || 1e9) - (parseInt(b.name) || 1e9) || a.name.localeCompare(b.name));
+    await pool(imgs, 6, async f => {
+      const key = 'av:' + f.name + ':' + (f.size || '');
+      let blob = await idb.get(key);
+      if (!blob) { const r = await gfetch('https://www.googleapis.com/drive/v3/files/' + f.id + '?alt=media&supportsAllDrives=true'); if (!r.ok) return; blob = await r.blob(); await idb.set(key, blob); }
+      if (AV.urls[f.name]) URL.revokeObjectURL(AV.urls[f.name]);
+      AV.urls[f.name] = URL.createObjectURL(blob);
+    });
+    AV.names = imgs.map(f => f.name).filter(n => AV.urls[n]);
+    if (say) toast(AV.names.length + ' avatars disponibles');
+    render();
+  } catch (e) { if (say) toast('Avatars : ' + e.message); }
+  finally { AV.loading = false; }
+}
+function avEl(who, cls) {
+  const p = AV.picks[who], u = p && AV.urls[p.img];
+  return u ? h('img', { class: 'av ' + (cls || ''), src: u, alt: who }) : h('span', { class: 'av ' + (cls || '') }, who[0]);
+}
+async function avPick(who, name) {
+  AV.picks[who] = { img: name, at: Date.now() }; store.set('avPicks', AV.picks); render();
+  try {
+    const fid = await avFolder(); if (!fid) return;
+    const body = JSON.stringify(AV.picks);
+    if (AV.choicesId) await gfetch('https://www.googleapis.com/upload/drive/v3/files/' + AV.choicesId + '?uploadType=media&supportsAllDrives=true', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body });
+    else { const r = await gfetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id', multipart({ name: 'bossplay-avatars.json', parents: [fid] }, body, 'application/json')); if (r.ok) AV.choicesId = (await r.json()).id; }
+  } catch { /* lecture seule (profils de la famille) : le choix reste sur cet appareil */ }
+}
+function avGallery() {
+  const who = sync.name || 'Boss';
+  sheet('Avatar de ' + who, [
+    AV.names.length ? h('div', { class: 'gal' }, AV.names.map(n => h('button', { class: AV.picks[who]?.img === n ? 'on' : '', onclick: () => { $('#sheet').hidden = true; avPick(who, n); toast('Avatar de ' + who + ' changé'); } }, h('img', { src: AV.urls[n], alt: n }))))
+      : h('div', { class: 'muted small', style: 'padding:0 12px 8px' }, AV.loading ? 'Chargement des avatars…' : 'Ajoute des images dans Google Drive › BossPlay › Avatars.'),
+    { label: '↻ Recharger les avatars', fn: () => avLoad(true) },
+  ]);
+}
 function pickProfile() {
-  sheet('Qui écoute sur cet appareil ?', [
-    h('div', { class: 'muted small', style: 'padding:0 12px 6px' }, sync.me ? 'Compte Google : ' + sync.me.email : ''),
-    ...FAMILY.map(n => ({ label: (n === sync.name ? '✓ ' : '') + n + (n === 'Boss' && !sync.admin ? ' (réservé au compte administrateur)' : ''),
-      fn: () => {
-        if (n === 'Boss' && !sync.admin) { toast('« Boss » est réservé au compte qui gère la musique.'); return pickProfile(); }
-        sync.name = n; store.set('profileName', n); markDirty(); render(); toast('Bonjour ' + n + ' !');
-      } })),
+  const choose = n => {
+    if (n === sync.name && !(n === 'Boss' && !bossOk)) { $('#sheet').hidden = true; return; }
+    $('#sheet').hidden = true;
+    if (n === 'Boss' && !sync.admin) { toast('« Boss » est réservé au compte qui gère la musique.'); return; }
+    if (n === 'Boss') return enterBoss();
+    bossOk = false; localStorage.removeItem('bossOk'); sync.name = n; store.set('profileName', n); markDirty(); render(); toast('Bonjour ' + n + ' !');
+  };
+  sheet(h('span', { class: 'who-title' }, 'Qui écoute sur', h('img', { src: 'logo.png', alt: 'BossPlay' }), '?'), [
+    h('div', { class: 'who-row' }, FAMILY.map(n => h('button', { class: 'who-p' + (n === sync.name ? ' on' : ''), onclick: () => choose(n) }, avEl(n), h('span', null, n + (n === 'Boss' ? ' 🔒' : ''))))),
+    h('div', { class: 'muted small', style: 'padding:0 12px 6px;text-align:center' }, sync.me ? 'Compte Google : ' + sync.me.email : ''),
+    sync.name ? { label: '🖼 Changer mon avatar', fn: () => avGallery() } : null,
+    isBoss() ? { label: '🔒 Changer le code de Boss', fn: () => pinDialog('Code actuel', 'Pour changer le code, tape d\'abord l\'actuel.', async c => {
+      if (store.get('bossPin', '') && await pinHash(c) !== store.get('bossPin', '')) { toast('Code faux.'); return; }
+      store.set('bossPin', ''); enterBoss();
+    }) } : null,
   ]);
 }
 function profileData() {
@@ -611,7 +719,7 @@ function back() { ui.stack.pop(); render(); }
 function filt(list, text) { if (!ui.q) return list; const q = fold(ui.q); return list.filter(x => fold(text(x)).includes(q)); }
 
 function render() {
-  const who = $('#who'); who.hidden = !sync.name; who.textContent = sync.name + (sync.admin ? ' ★' : '');
+  const who = $('#who'); who.hidden = !sync.name; who.replaceChildren(...(sync.name ? [avEl(sync.name, 'sm')] : []), sync.name + (isBoss() ? ' ★' : (sync.name === 'Boss' ? ' 🔒' : '')));
   document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === ui.tab && !ui.stack.length));
   $('#back').hidden = !ui.stack.length;
   const v = $('#view'); v.replaceChildren();
@@ -738,6 +846,8 @@ function trackMenu(t, pl) {
   sheet(t.title, [
     { label: 'Lire ensuite', fn: () => playNext([t]) },
     { label: 'Ajouter à la file d\'attente', fn: () => addQueue([t]) },
+    { label: '🎚 Pastille Dolby du titre…', fn: () => dolbyMenu('t:' + t.id, t.title) },
+    { label: '🎚 Pastille Dolby de l\'album…', fn: () => dolbyMenu('a:' + t.albumId, t.album) },
     { label: fav ? 'Retirer des favoris' : 'Ajouter aux favoris', fn: () => { toggleFav('t', t.id); render(); updatePlayer(); } },
     { label: 'Ajouter à une playlist…', fn: () => sheet('Ajouter à une playlist', [{ label: '+ Nouvelle playlist…', fn: () => newPlaylist([t.id]) },
       ...playlists.map(p => ({ label: p.name, fn: () => { if (!p.ids.includes(t.id)) p.ids.push(t.id); savePl(p); toast('Ajouté à « ' + p.name + ' »'); } }))]) },
@@ -1164,19 +1274,19 @@ function viewSettings(v) {
   const ago = sync.last ? Math.max(0, Math.round((Date.now() - sync.last) / 60000)) : null;
   v.append(h('h1', null, 'Réglages'),
     h('div', { class: 'card' }, h('h2', { style: 'margin-top:0' }, 'Profil'),
-      h('div', { class: 'row' }, h('b', { style: 'font-size:18px' }, sync.name || 'Aucun profil choisi'), sync.admin ? h('span', { class: 'pill on' }, 'Administrateur') : null,
+      h('div', { class: 'row' }, h('b', { style: 'font-size:18px' }, sync.name || 'Aucun profil choisi'), isBoss() ? h('span', { class: 'pill on' }, 'Administrateur') : null,
         h('button', { class: 'pill', onclick: () => hasToken() ? pickProfile() : connect() }, 'Changer')),
       h('p', { class: 'muted small' }, sync.me ? 'Compte Google : ' + sync.me.email : 'Connecte-toi avec ton propre compte Google : tes favoris, playlists et écoutes te suivent sur tous tes appareils, sans se mélanger avec ceux de la famille.'),
       h('p', { class: 'small', style: sync.error ? 'color:var(--red)' : '' }, sync.error || (ago == null ? '' : '✓ Synchronisé ' + (ago < 1 ? 'à l\'instant' : 'il y a ' + ago + ' min') + ' · ' + favs.tracks.size + ' titres favoris · ' + playlists.length + ' playlists · ' + playLog.length + ' écoutes')),
       h('button', { class: 'pill', onclick: async () => { if (!hasToken() && !(await connect())) return; await pull(); toast(sync.error || 'Synchronisé'); render(); } }, 'Synchroniser maintenant')),
-    sync.admin ? h('div', { class: 'card' }, h('h2', { style: 'margin-top:0' }, 'Administration (Boss)'),
+    isBoss() ? h('div', { class: 'card' }, h('h2', { style: 'margin-top:0' }, 'Administration (Boss)'),
       h('p', { class: 'muted small' }, 'Pour la famille : dans Google Drive, partage le dossier de musique avec les comptes de Sam, Adam et Sofia en tant que « Lecteur ». Google les empêche alors de modifier ou supprimer quoi que ce soit.'),
       h('div', { class: 'btns' },
         h('button', { class: 'btn', onclick: () => publishIndex(null, false) }, 'Publier la bibliothèque pour la famille'),
         h('button', { class: 'btn alt', onclick: async () => { if (!hasToken() && !(await connect())) return; scan(true); } }, 'Relire toute la musique'))) : null,
     h('div', { class: 'card' }, h('h2', { style: 'margin-top:0' }, 'Google Drive'),
-      sync.admin || !S.clientId ? h('div', { class: 'muted small' }, 'ID client OAuth (Application Web) de ton projet Google Cloud :') : null,
-      sync.admin || !S.clientId ? h('div', { class: 'row', style: 'margin:6px 0 10px' }, id, h('button', { class: 'btn', onclick: () => { S.clientId = id.value.trim(); saveS(); tokenClient = null; toast('ID client enregistré'); render(); } }, 'Enregistrer')) : null,
+      isBoss() || !S.clientId ? h('div', { class: 'muted small' }, 'ID client OAuth (Application Web) de ton projet Google Cloud :') : null,
+      isBoss() || !S.clientId ? h('div', { class: 'row', style: 'margin:6px 0 10px' }, id, h('button', { class: 'btn', onclick: () => { S.clientId = id.value.trim(); saveS(); tokenClient = null; toast('ID client enregistré'); render(); } }, 'Enregistrer')) : null,
       h('div', null, hasToken() ? '✓ Connecté à Google Drive' : 'Pas connecté', ' ',
         h('button', { class: 'pill', onclick: async () => { if (await connect()) render(); } }, hasToken() ? 'Reconnecter' : 'Se connecter')),
       h('p', null, 'Dossier de musique : ', h('b', null, S.rootName || 'aucun')),
@@ -1256,11 +1366,25 @@ function tvAddr(ask) {
   }
   return a;
 }
-function tvSend(q) {
+const RELAY = 'https://radio.bossplay.workers.dev/relay/send';
+// Envoi par le relais Cloudflare (un seul toucher, rien ne s'ouvre) ; sinon, page de la télé sur le Wi-Fi.
+async function tvSend(q) {
+  if (hasToken()) {
+    try {
+      const r = await gfetch(RELAY, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ q }) });
+      const j = await r.json().catch(() => ({}));
+      if (r.ok && j.ok) {
+        toast(j.tv ? '📺 Envoyé à la télé : ' + q : '📺 Envoyé : « ' + q + ' » — ouvre BossPlay sur la télé (dans les 2 minutes)', 3500);
+        return;
+      }
+      if (r.status === 401) toast('Ce compte Google n\'est pas autorisé sur le serveur BossPlay : envoi par le Wi-Fi.', 3500);
+    } catch (e) { /* serveur injoignable : envoi par le Wi-Fi */ }
+  }
+  tvLocal(q);
+}
+function tvLocal(q) {
   const a = tvAddr(false); if (!a) return;
-  // Page https → télé en http : on ouvre la page de la télé dans cette fenêtre (les fenêtres surgissantes
-  // sont souvent bloquées, surtout dans l'appli installée sur l'écran d'accueil).
-  toast('📺 Envoi à la télé : ' + q, 2500);
+  toast('📺 Envoi à la télé par le Wi-Fi : ' + q, 2500);
   location.href = 'http://' + a + '/?q=' + encodeURIComponent(q);
 }
 let tvBusy = false;
@@ -1271,7 +1395,7 @@ function tvSearch() {
   const R = window.SpeechRecognition || window.webkitSpeechRecognition;
   const ask = () => { const q = (prompt('Chercher sur la télé (tu peux utiliser le micro du clavier) :') || '').trim(); if (q) tvSend(q); };
   if (!R) return ask();
-  if (!tvAddr(false)) return;
+  if (!hasToken() && !tvAddr(false)) return;
   let done = false;
   const r = new R(); r.lang = 'fr-CA'; r.interimResults = false; r.maxAlternatives = 1; r.continuous = false;
   const stop = () => { tvBusy = false; $('#tvsearch').classList.remove('on'); };
@@ -1414,7 +1538,7 @@ function viewRadio(v) {
   q.addEventListener('keydown', e => { if (e.key === 'Enter') go2(); });
   v.append(h('h1', null, 'Radio'),
     h('div', { class: 'row', style: 'margin-bottom:12px' }, q, h('button', { class: 'btn', onclick: go2 }, 'Chercher')),
-    h('p', { class: 'muted small' }, 'Pendant l\'écoute, « ♥ Retenir ce titre » garde la chanson dans tes envies' + (sync.admin ? '.' : ' et la transmet à Boss.') + ' Astuce : lance Shazam depuis le Centre de contrôle pour connaître le titre.'));
+    h('p', { class: 'muted small' }, 'Pendant l\'écoute, « ♥ Retenir ce titre » garde la chanson dans tes envies' + (isBoss() ? '.' : ' et la transmet à Boss.') + ' Astuce : lance Shazam depuis le Centre de contrôle pour connaître le titre.'));
   if (X.radios.length) v.append(h('h2', null, 'Mes radios'), h('div', { class: 'list' }, X.radios.map(stationRow)));
   v.append(h('h2', null, radio.q ? 'Résultats' : 'Populaires au Canada'));
   if (radio.loading) v.append(h('p', { class: 'muted' }, 'Recherche…'));
@@ -1438,7 +1562,7 @@ function wishSheet(pre = {}) {
 function addWish(w) {
   const e = Object.assign({ id: 'w' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), at: Date.now(), by: sync.name || 'Boss' }, w);
   X.wishes.unshift(e); saveX();
-  toast(sync.admin ? '♥ Ajouté à ta liste d\'achats' : '♥ Retenu — Boss le verra dans sa liste');
+  toast(isBoss() ? '♥ Ajouté à ta liste d\'achats' : '♥ Retenu — Boss le verra dans sa liste');
   publishWishes();
   if (ui.tab === 'wishes') render();
 }
@@ -1461,7 +1585,7 @@ async function doPublishWishes() {
     const data = { who: sync.name, email: sync.me?.email || '', updated: Date.now(), wishes: X.wishes };
     const newId = await writeJson(name, data, id, ['root']);
     store.set('xWishFile', newId);
-    if (!sync.admin && !store.get('xWishShared', false)) {
+    if (!isBoss() && !store.get('xWishShared', false)) {
       const to = await adminEmail();
       if (to && to !== sync.me?.email) {
         const r = await gfetch('https://www.googleapis.com/drive/v3/files/' + newId + '/permissions?sendNotificationEmail=true&emailMessage=' +
@@ -1473,7 +1597,7 @@ async function doPublishWishes() {
   } catch (e) { if (e.message !== 'auth') console.warn('envies', e); }
 }
 async function loadFamilyWishes() {
-  if (!sync.admin || !hasToken()) return;
+  if (!isBoss() || !hasToken()) return;
   try {
     const j = await drive('files', { q: "name contains 'bossplay-envies-' and trashed=false", fields: 'files(id,name,modifiedTime,owners(displayName,emailAddress))', pageSize: 50 });
     const all = [];
@@ -1522,12 +1646,12 @@ function wishRow(w, mine) {
       w.who ? h('span', { class: 'pill on' }, w.who) : null),
     h('div', { class: 'muted small' }, [w.station ? '📻 ' + w.station : '', when(w.at)].filter(Boolean).join(' · ')),
     w.note ? h('div', { class: 'small' }, '« ' + w.note + ' »') : null,
-    h('div', { class: 'row', style: 'margin-top:8px' }, h('button', { class: 'pill', onclick: () => copyWish(w) }, '📋 Copier'), ...(sync.admin ? buyLinks(w) : []),
-      sync.admin ? h('button', { class: 'pill' + (done ? ' on' : ''), onclick: () => { if (done) delete X.bought[w.id]; else X.bought[w.id] = Date.now(); saveX(); render(); } }, done ? '✓ Acheté' : 'Marquer acheté') : null,
+    h('div', { class: 'row', style: 'margin-top:8px' }, h('button', { class: 'pill', onclick: () => copyWish(w) }, '📋 Copier'), ...(isBoss() ? buyLinks(w) : []),
+      isBoss() ? h('button', { class: 'pill' + (done ? ' on' : ''), onclick: () => { if (done) delete X.bought[w.id]; else X.bought[w.id] = Date.now(); saveX(); render(); } }, done ? '✓ Acheté' : 'Marquer acheté') : null,
       mine ? h('button', { class: 'pill', onclick: () => delWish(w) }, 'Retirer') : null));
 }
 function viewWishes(v) {
-  if (sync.admin) {
+  if (isBoss()) {
     if (X.newCount) { X.wishSeen = Date.now(); X.newCount = 0; saveX(); tabBadge(); }
     const todo = X.family.concat(X.wishes.map(w => Object.assign({ who: 'Boss' }, w))).sort((a, b) => b.at - a.at);
     const open = todo.filter(w => !X.bought[w.id]), done = todo.filter(w => X.bought[w.id]);
@@ -1606,16 +1730,42 @@ function sleepBtn() {
 }
 
 // ---------- Badges de format ----------
+// Pastille Dolby indiquée à la main (titre ou album), gardée sur cet appareil.
+const DOLBY = [['dolby_a', 'Dolby A'], ['dolby_b', 'Dolby B'], ['dolby_c', 'Dolby C'], ['dolby_s', 'Dolby S'], ['dolby_sr', 'Dolby SR'],
+  ['dolby_surround', 'Dolby Surround'], ['dolby_pro_logic_ii', 'Dolby Pro Logic II']];
+const dolbyTags = store.get('dolbyTags', {});
+const dolbyOf = t => dolbyTags['t:' + t.id] || dolbyTags['a:' + t.albumId] || '';
+function dolbyMenu(key, name) {
+  const cur = dolbyTags[key] || '';
+  const set = c => { if (c) dolbyTags[key] = c; else delete dolbyTags[key]; store.set('dolbyTags', dolbyTags); updateBadges(curTrackSafe()); toast(c ? 'Pastille : ' + DOLBY.find(d => d[0] === c)[1] : 'Pastille retirée'); };
+  sheet('Pastille Dolby — ' + name, [{ label: (cur ? '' : '✓ ') + 'Aucune', fn: () => set('') },
+    ...DOLBY.map(([c, n]) => ({ label: (cur === c ? '✓ ' : '') + n, fn: () => set(c) }))]);
+}
+function curTrackSafe() { try { return cur(); } catch (e) { return null; } }
+function badgeImg(code, label) {
+  // Le grand lecteur est toujours sombre : image « _dark ».
+  const img = h('img', { class: 'badge-img', alt: label, title: label, src: 'badges/' + code + '_dark.png' });
+  img.onerror = () => { img.replaceWith(h('span', { class: 'badge' }, label.toUpperCase())); };
+  return img;
+}
 function updateBadges(t) {
   const box = $('#full .badges'); if (!box) return;
   if (!t) { box.replaceChildren(); return; }
   const ext = (t.name || '').split('.').pop().toLowerCase();
-  const fmtName = { mp3: 'MP3', m4a: 'AAC', aac: 'AAC', mp4: 'AAC', flac: 'FLAC', wav: 'WAV', aif: 'AIFF', aiff: 'AIFF', ogg: 'OGG', opus: 'OPUS' }[ext] || ext.toUpperCase();
+  const fmtName = { mp3: 'MP3', m4a: 'AAC', aac: 'AAC', mp4: 'AAC', flac: 'FLAC', wav: 'WAV', aif: 'AIFF', aiff: 'AIFF', ogg: 'OGG', opus: 'OPUS', ac3: 'AC-3', ec3: 'E-AC-3', eac3: 'E-AC-3', dts: 'DTS' }[ext] || ext.toUpperCase();
   const lossless = ['flac', 'wav', 'aif', 'aiff'].includes(ext);
   const d = audio.duration;
   const kbps = t.size && d ? Math.round(t.size * 8 / d / 1000) : 0;
-  const items = [fmtName, lossless ? 'Sans perte' : kbps ? kbps + ' kb/s' : '', 'Stéréo', offline.has(t.id) ? 'Hors ligne' : ''];
-  box.replaceChildren(...items.filter(Boolean).map((s, i) => h('span', { class: 'badge' + (i === 0 ? ' main' : '') }, s)));
+  const multi = ['ac3', 'ec3', 'eac3', 'dts'].includes(ext);
+  const items = [fmtName, lossless ? 'Sans perte' : kbps ? kbps + ' kb/s' : '', multi ? '' : 'Stéréo', offline.has(t.id) ? 'Hors ligne' : ''];
+  const nodes = items.filter(Boolean).map((s, i) => h('span', { class: 'badge' + (i === 0 ? ' main' : '') }, s));
+  if (ext === 'ac3') nodes.push(badgeImg('dolby_digital', 'Dolby Digital'));
+  if (ext === 'ec3' || ext === 'eac3') nodes.push(h('span', { class: 'badge' }, 'DOLBY DIGITAL PLUS'));
+  if (ext === 'dts') nodes.push(h('span', { class: 'badge' }, 'DTS'));
+  if (multi) nodes.push(badgeImg('surround', 'Surround'));
+  const dz = dolbyOf(t);
+  if (dz) nodes.push(badgeImg(dz, (DOLBY.find(x => x[0] === dz) || [0, dz])[1]));
+  box.replaceChildren(...nodes);
 }
 audio.addEventListener('loadedmetadata', () => updateBadges(cur()));
 
@@ -1790,8 +1940,8 @@ function remotePanel(d) {
 }
 setInterval(rcPoll, 4000);
 setInterval(() => rcPublish(), 60000);
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { rcPublish(true); if (sync.admin) loadFamilyWishes(); } });
-setInterval(() => { if (sync.admin && document.visibilityState === 'visible') loadFamilyWishes(); }, 10 * 60000);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { rcPublish(true); if (isBoss()) loadFamilyWishes(); } });
+setInterval(() => { if (isBoss() && document.visibilityState === 'visible') loadFamilyWishes(); }, 10 * 60000);
 
 function extrasSettings() {
   const nm = h('input', { class: 'field', value: devName(), placeholder: 'Nom de cet appareil' });
