@@ -2,7 +2,7 @@
    Paroles : LRCLIB. Clips : YouTube (lecteur officiel intégré, ou l'appli YouTube / YouTube Music). */
 'use strict';
 
-const VERSION = '1.3.2';
+const VERSION = '1.4.1';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
 const YT_KEY = 'AIzaSyDoAxJzDHTkIPDqZbVcLr2Aguu40kPZqio';            // clé « BossPlayPWA » (limitée à bosseagle-la.github.io)
 // Lecture de la musique + dossier caché de BossPlay (profil de chacun) + fichiers créés par BossPlay (index de la bibliothèque).
 const SCOPE = 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file';
@@ -1794,12 +1794,26 @@ function karaoke() {
 // ---------- Commande vocale ----------
 function voice() {
   const R = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!R) return toast('La commande vocale n\'est pas disponible dans ce navigateur.');
+  if (!R) return voiceAsk('');
   const r = new R(); r.lang = 'fr-CA'; r.interimResults = false; r.maxAlternatives = 1;
-  toast('🎙 Je t\'écoute… (ex. « joue Bob Marley », « pause », « suivant », « radio CKOI »)', 6000);
-  r.onresult = e => doVoice(e.results[0][0].transcript || '');
-  r.onerror = () => toast('Je n\'ai pas compris.');
-  r.start();
+  let done = false;
+  toast('Je t\'écoute… (ex. « joue Bob Marley », « pause », « suivant », « radio CKOI »)', 6000);
+  r.onresult = e => { done = true; doVoice(e.results[0][0].transcript || ''); };
+  // Sur l'iPhone, une appli installée sur l'écran d'accueil n'a souvent pas droit à la reconnaissance vocale :
+  // on le dit clairement et on propose de taper ou de dicter la commande avec le micro du clavier.
+  r.onerror = e => {
+    if (done) return; done = true;
+    const why = e && e.error;
+    if (why === 'no-speech') return toast('Je n\'ai rien entendu. Touche le micro et parle tout de suite.');
+    if (why === 'aborted') return;
+    voiceAsk(why === 'not-allowed' || why === 'service-not-allowed' ? 'Le micro n\'est pas autorisé ici.' : 'La reconnaissance vocale ne marche pas ici.');
+  };
+  try { r.start(); } catch { voiceAsk(''); }
+}
+/** Commande tapée, ou dictée avec le micro du clavier (marche partout). */
+function voiceAsk(why) {
+  const q = (prompt((why ? why + ' ' : '') + 'Tape ta commande, ou dicte-la avec le micro du clavier :\n« joue Bob Marley », « pause », « suivant », « radio CKOI »') || '').trim();
+  if (q) doVoice(q);
 }
 function doVoice(s) {
   const t = fold(s).trim(); toast('« ' + s + ' »', 2000);
@@ -1917,8 +1931,8 @@ async function remoteSheet() {
     const ago = d => Math.max(0, Math.round((Date.now() - d.seen) / 60000));
     sheet('Contrôler un autre appareil', [
       h('div', { class: 'muted small', style: 'padding:0 12px 8px' }, 'Appareils BossPlay ouverts avec ton compte Google (' + (sync.me?.email || '') + '). Cet appareil : ' + devName() + '.'),
-      ...(rc.devices.length ? rc.devices.map(d => ({ label: '📡 ' + d.name + (d.who ? ' (' + d.who + ')' : '') + ' — ' + (d.now ? (d.now.radio ? '📻 ' + d.now.radio : (d.now.playing ? '▶ ' : '⏸ ') + d.now.title) : 'à l\'arrêt') + (ago(d) > 2 ? ' · vu il y a ' + ago(d) + ' min' : ''), fn: () => remotePanel(d) }))
-        : [h('div', { style: 'padding:6px 12px' }, 'Aucun autre appareil trouvé. Ouvre BossPlay sur l\'autre appareil, avec le même compte Google.')]),
+      ...(rc.devices.length ? rc.devices.map(d => ({ label: d.name + (d.who ? ' (' + d.who + ')' : '') + ' — ' + (d.now ? (d.now.radio ? '📻 ' + d.now.radio : (d.now.playing ? '▶ ' : '⏸ ') + d.now.title) : 'à l\'arrêt') + (ago(d) > 2 ? ' · vu il y a ' + ago(d) + ' min' : ''), fn: () => remotePanel(d) }))
+        : [h('div', { style: 'padding:6px 12px' }, 'Aucun autre appareil trouvé. L\'autre appareil doit avoir BossPlay ouvert depuis moins de 30 minutes, avec le même compte Google. La tablette doit avoir été reliée à Google Drive depuis la version 1.8.1.')]),
     ]);
   } catch (e) { sheet('Télécommande', [h('div', { style: 'padding:0 12px' }, 'Impossible : ' + e.message)]); }
 }

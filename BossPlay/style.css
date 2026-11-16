@@ -33,6 +33,7 @@ input{font:inherit;color:inherit}
 #search{flex:1;min-width:0;padding:8px 12px;border-radius:10px;border:1px solid var(--line);background:var(--panel2)}
 .icon{font-size:20px;padding:6px 8px;border-radius:10px;line-height:1}
 .icon:active{background:var(--panel2)}
+.icon svg{display:block}
 #banner{padding:10px 14px;background:var(--accent);color:#fff;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 #banner button{background:#fff;color:var(--accent);border-radius:8px;padding:6px 12px;font-weight:700}
 #tabs{display:flex;gap:4px;padding:8px 10px;overflow-x:auto;background:var(--panel);border-bottom:1px solid var(--line);scrollbar-width:none}

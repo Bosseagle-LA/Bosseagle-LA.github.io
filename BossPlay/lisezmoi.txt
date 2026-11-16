@@ -1,1 +1,2 @@
-BossPlay PWA
+BossPlay PWA 1.4.1
+Remplacer tout le contenu du dossier BossPlay du dépôt bosseagle-la.github.io par ces fichiers (badges compris).
