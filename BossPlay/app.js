@@ -2,7 +2,7 @@
    Paroles : LRCLIB. Clips : YouTube (lecteur officiel intégré, ou l'appli YouTube / YouTube Music). */
 'use strict';
 
-const VERSION = '1.6.1';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
+const VERSION = '1.6.2';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
 const YT_KEY = 'AIzaSyDoAxJzDHTkIPDqZbVcLr2Aguu40kPZqio';            // clé « BossPlayPWA » (limitée à bosseagle-la.github.io)
 // Lecture de la musique + dossier caché de BossPlay (profil de chacun) + fichiers créés par BossPlay (index de la bibliothèque).
 const SCOPE = 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file';
@@ -2066,6 +2066,8 @@ function rcPos(d) {
   const p = (n.pos || 0) + (n.playing ? Math.max(0, (Date.now() + rc.skew - (d.srv || 0)) / 1000) : 0);
   return n.dur ? Math.min(p, n.dur) : p;
 }
+// « Sam · en lecture sur iPhone » : qui écoute (le profil choisi sur cet appareil) et sur quel appareil.
+const rcWho = d => (d.who ? d.who + ' · ' : '') + 'en lecture sur ' + d.name;
 const mmss = x => { x = Math.max(0, Math.floor(x || 0)); return Math.floor(x / 60) + ':' + String(x % 60).padStart(2, '0'); };
 const rcTrack = n => (n && ((n.id && lib.byId.get(n.id)) || byPath(n.path))) || null;
 const rcKindIcon = k => k === 'tv' ? 'Télé' : k === 's8' ? 'Tablette' : k === 'mac' ? 'Mac' : 'Téléphone';
@@ -2099,7 +2101,7 @@ function rcShow() {
       const t = rcTrack(n), art = $('.art', bar);
       if (t) coverInto(art, t); else art.replaceChildren(h('span', { class: 'rlogo', style: 'font-size:20px' }, n.radio ? '📻' : '♪'));
       $('.t', bar).textContent = n.radio || n.title || '';
-      $('.s', bar).textContent = 'En lecture sur ' + d.name + (n.artist ? ' · ' + n.artist : '');
+      $('.s', bar).textContent = rcWho(d) + (n.artist ? ' · ' + n.artist : '');
       $('.take', bar).hidden = !!n.radio;
     }
     bar.dataset.dev = d.id;
@@ -2135,7 +2137,7 @@ function remoteSheet(openId) {
   if (!rc.loop) rcKick();
   const d0 = openId && rc.devices.find(d => d.id === openId);
   if (d0) return remotePanel(d0);
-  const line = d => { const n = d.now; return d.name + (d.who && d.who !== sync.name ? ' (' + d.who + ')' : '') + ' — ' + (n ? (n.radio ? '📻 ' + n.radio : (n.playing ? '▶ ' : '⏸ ') + n.title) : 'à l\'arrêt'); };
+  const line = d => { const n = d.now; return (d.who ? d.who + ' · ' : '') + d.name + ' — ' + (n ? (n.radio ? '📻 ' + n.radio : (n.playing ? '▶ ' : '⏸ ') + n.title) : 'à l\'arrêt'); };
   sheet('Mes appareils', [
     h('div', { class: 'muted small', style: 'padding:0 12px 8px' }, 'Cet appareil : ' + devName() + ' · profil ' + sync.name + '.'),
     ...(rc.devices.length ? rc.devices.map(d => ({ label: line(d), fn: () => remotePanel(d) }))
@@ -2153,7 +2155,7 @@ function remotePanel(d) {
   const play = h('button', { class: 'btn', onclick: () => send('toggle', null, () => { const x = live(); if (x.now) { x.now.pos = rcPos(x); x.srv = Date.now() + rc.skew; x.now.playing = !x.now.playing; } }) }, '⏯');
   const take = h('button', { class: 'it', onclick: () => rcTakeOver(live()) }, 'Continuer ici (sur ' + devName() + ')');
   const box = h('div', { class: 'rc-now' }, art, h('div', { class: 'rc-meta' }, title, sub));
-  sheet(rcKindIcon(d.kind) + ' · ' + d.name, [
+  sheet((d.who ? d.who + ' · ' : '') + d.name, [
     box, h('div', { style: 'padding:0 12px' }, bar, time),
     h('div', { class: 'btns', style: 'padding:6px 12px 10px;justify-content:center' }, btn('⏮', 'prev'), play, btn('⏭', 'next'), btn('−15 s', 'seek', -15), btn('+15 s', 'seek', 15), btn('Vol −', 'vol', -0.1), btn('Vol +', 'vol', 0.1)),
     take,
