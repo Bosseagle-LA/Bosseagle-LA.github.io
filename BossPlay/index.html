@@ -10,8 +10,8 @@
 <meta name="apple-mobile-web-app-title" content="BossPlay">
 <title>BossPlay</title>
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="icon" href="icon-192.png">
-<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" href="bp-icone-192.png">
+<link rel="apple-touch-icon" sizes="180x180" href="bp-icone-180.png">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -22,7 +22,7 @@
     <input id="search" type="search" placeholder="Rechercher" autocomplete="off">
     <button id="mic" class="icon" aria-label="Commande vocale" title="Commande vocale"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></svg></button>
     <button id="tvsearch" class="icon" aria-label="Chercher sur la télé" title="Chercher sur la télé"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4.5" width="18" height="12" rx="2"/><path d="M8 20h8"/><circle cx="11.3" cy="10" r="2.4"/><path d="M13.1 11.8l2.1 2.1"/></svg></button>
-    <button id="remote" class="icon" aria-label="Contrôler un autre appareil" title="Contrôler un autre appareil"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="13" height="9.5" rx="1.6"/><path d="M6.5 17h5"/><rect x="15.5" y="9" width="5.5" height="11" rx="1.4"/><path d="M17.8 17.4h.9"/></svg></button>
+    <button id="remote" class="icon" aria-label="Mes appareils" title="Mes appareils"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="13" height="9.5" rx="1.6"/><path d="M6.5 17h5"/><rect x="15.5" y="9" width="5.5" height="11" rx="1.4"/><path d="M17.8 17.4h.9"/></svg></button>
     <button id="who" class="pill" hidden></button>
     <button id="theme" class="icon" aria-label="Thème jour/nuit">◐</button>
   </header>
@@ -38,6 +38,13 @@
     <button data-tab="stats">Écoutes</button>
     <button data-tab="settings">Réglages</button>
   </nav>
+  <div id="else" hidden>
+    <div class="art"></div>
+    <div class="meta"><div class="t"></div><div class="s"></div></div>
+    <button class="icon pp" aria-label="Mettre en pause sur l'autre appareil">⏸</button>
+    <button class="pill take">Continuer ici</button>
+    <div class="bar"><div class="fill"></div></div>
+  </div>
   <main id="view"></main>
   <div id="mini" hidden>
     <div class="bar"><div class="fill"></div></div>

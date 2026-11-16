@@ -2,11 +2,12 @@
    Paroles : LRCLIB. Clips : YouTube (lecteur officiel intégré, ou l'appli YouTube / YouTube Music). */
 'use strict';
 
-const VERSION = '1.4.1';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
+const VERSION = '1.5.0';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
 const YT_KEY = 'AIzaSyDoAxJzDHTkIPDqZbVcLr2Aguu40kPZqio';            // clé « BossPlayPWA » (limitée à bosseagle-la.github.io)
 // Lecture de la musique + dossier caché de BossPlay (profil de chacun) + fichiers créés par BossPlay (index de la bibliothèque).
 const SCOPE = 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file';
 const FAMILY = ['Boss', 'Sam', 'Adam', 'Sofia'];
+const KIDS = ['Adam', 'Sofia'];   // profils des enfants : aucun accès aux Réglages, ni au compte Google, ni aux connexions
 const PROFILE_FILE = 'bossplay-profil.json';
 const INDEX_FILE = 'bossplay-index.json';
 const DEFAULT_CLIENT = '660248878537-3pvnlm8fkk4r9heemoa4p7aq5am0h8gg.apps.googleusercontent.com';   // ID client OAuth « BossPlay PWA »
@@ -30,6 +31,7 @@ function h(tag, attrs, ...kids) {
 const fold = s => (s || '').normalize('NFD').replace(/\p{Mn}+/gu, '').toLowerCase();
 const fmt = sec => { sec = Math.max(0, Math.floor(sec || 0)); return Math.floor(sec / 60) + ':' + String(sec % 60).padStart(2, '0'); };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+const RBASE = 'https://radio.bossplay.workers.dev';   // relais BossPlay (Cloudflare)
 function toast(msg, ms = 2600) {
   const t = $('#toast'); t.textContent = msg; t.hidden = false;
   clearTimeout(toast._t); toast._t = setTimeout(() => { t.hidden = true; }, ms);
@@ -194,7 +196,7 @@ async function whoAmI() {
     if (!sync.name) pickProfile();
     else if (sync.name === 'Boss' && sync.admin && !bossOk) enterBoss();
     if (isBoss()) loadFamilyWishes();
-    rcPublish(true);
+    pinShare(); rcKick();
     render();
   } catch (e) { if (e.message !== 'auth') { sync.error = e.message; } }
 }
@@ -219,24 +221,52 @@ function pinDialog(title, sub, onCode) {
   ]);
   setTimeout(() => inp.focus(), 80);
 }
-function enterBoss() {
+const isKid = () => KIDS.includes(sync.name);
+// Le code de Boss est commun à toute la famille : son empreinte est gardée par le relais BossPlay.
+// Ainsi, sur l'appareil d'un enfant (où Boss n'a jamais tapé son code), personne ne peut « créer » un code de Boss.
+async function pinAsk(body) {
+  const r = await fetch(RBASE + '/pin', { method: 'POST', headers: { Authorization: 'Bearer ' + await token(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!r.ok) throw new Error('relais ' + r.status);
+  return r.json();
+}
+// Passe à un profil d'adulte après vérification du code de Boss. « who » = 'Boss' ou 'Sam'.
+function enterBoss(who = 'Boss') {
   const saved = store.get('bossPin', '');
-  const become = () => { bossOk = true; localStorage.setItem('bossOk', '1'); sync.name = 'Boss'; store.set('profileName', 'Boss'); markDirty(); render(); toast('Bonjour Boss !'); };
-  if (!saved) {
-    return pinDialog('Créer le code de Boss', 'Ce code sera demandé chaque fois qu\'on choisit le profil Boss sur cet appareil.', c1 =>
-      pinDialog('Confirmer le code', 'Retape le même code.', async c2 => {
-        if (c1 !== c2) { toast('Les deux codes sont différents.'); return enterBoss(); }
-        store.set('bossPin', await pinHash(c1)); become();
-      }));
-  }
-  let tries = store.get('bossPinTries', 0), until = store.get('bossPinUntil', 0);
-  if (Date.now() < until) { toast('Trop d\'essais : réessaie dans ' + Math.ceil((until - Date.now()) / 60000) + ' min.'); return; }
-  pinDialog('Code de Boss', 'Profil administrateur protégé.', async c => {
-    if (await pinHash(c) === saved) { store.set('bossPinTries', 0); become(); return; }
-    tries++; store.set('bossPinTries', tries);
-    if (tries >= 5) { store.set('bossPinUntil', Date.now() + 5 * 60000); store.set('bossPinTries', 0); toast('Code faux : profil Boss bloqué 5 minutes.'); }
-    else toast('Code faux (' + (5 - tries) + ' essai(s) restant(s)).');
+  const become = () => {
+    bossOk = who === 'Boss'; bossOk ? localStorage.setItem('bossOk', '1') : localStorage.removeItem('bossOk');
+    sync.name = who; store.set('profileName', who); markDirty(); render(); rcKick(); toast('Bonjour ' + who + ' !');
+  };
+  const create = () => pinDialog('Créer le code de Boss', 'Ce code protège les profils des adultes et les Réglages, sur tous les appareils de la famille.', c1 =>
+    pinDialog('Confirmer le code', 'Retape le même code.', async c2 => {
+      if (c1 !== c2) { toast('Les deux codes sont différents.'); return create(); }
+      const hh = await pinHash(c1);
+      try { const j = await pinAsk({ op: 'set', h: hh }); if (!j.match) { toast('Un code de Boss existe déjà : tape-le.'); return enterBoss(who); } } catch { }
+      store.set('bossPin', hh); become();
+    }));
+  pinDialog('Code de Boss', who === 'Boss' ? 'Profil administrateur protégé.' : 'Demande à papa : son code est nécessaire pour quitter un profil d\'enfant.', async c => {
+    const hh = await pinHash(c);
+    let j = null;
+    try { j = await pinAsk({ op: 'check', h: hh }); } catch { }
+    if (j && j.wait) return toast('Trop d\'essais : réessaie dans ' + Math.ceil(j.wait / 60) + ' min.');
+    if (j && j.set) {                                   // le relais connaît le code : c'est lui qui décide
+      if (!j.match) return toast('Code faux.');
+      store.set('bossPin', hh); return become();
+    }
+    if (saved) {                                        // relais muet ou pas encore de code commun : code gardé sur cet appareil
+      if (hh !== saved) return toast('Code faux.');
+      if (j) pinAsk({ op: 'set', h: hh }).catch(() => { });   // on le rend commun à la famille
+      return become();
+    }
+    if (j && !j.set && !isKid()) return create();       // tout premier code de la famille
+    if (j && !j.set) return toast('Boss n\'a pas encore créé son code.');
+    toast('Vérification impossible sans Internet : réessaie plus tard.');
   });
+}
+// Sur l'appareil de Boss : rend commun le code déjà créé ici (une seule fois, sans rien demander).
+async function pinShare() {
+  const saved = store.get('bossPin', '');
+  if (!saved || !isBoss() || !hasToken() || store.get('pinShared', false)) return;
+  try { const j = await pinAsk({ op: 'state' }); if (!j.set) await pinAsk({ op: 'set', h: saved }); store.set('pinShared', true); } catch { }
 }
 // ---------- Avatars (Google Drive › BossPlay › Avatars) ----------
 const AV = { names: [], urls: {}, folder: null, choicesId: null, picks: store.get('avPicks', {}), loading: false };
@@ -297,20 +327,33 @@ function avGallery() {
   ]);
 }
 function pickProfile() {
+  const kid = isKid();
   const choose = n => {
     if (n === sync.name && !(n === 'Boss' && !bossOk)) { $('#sheet').hidden = true; return; }
     $('#sheet').hidden = true;
     if (n === 'Boss' && !sync.admin) { toast('« Boss » est réservé au compte qui gère la musique.'); return; }
-    if (n === 'Boss') return enterBoss();
-    bossOk = false; localStorage.removeItem('bossOk'); sync.name = n; store.set('profileName', n); markDirty(); render(); toast('Bonjour ' + n + ' !');
+    if (n === 'Boss') return enterBoss('Boss');
+    if (kid && !KIDS.includes(n)) return enterBoss(n);          // d'un profil d'enfant vers un adulte : code de Boss
+    bossOk = false; localStorage.removeItem('bossOk'); sync.name = n; store.set('profileName', n); markDirty();
+    if (KIDS.includes(n) && ui.tab === 'settings') ui.tab = 'albums';
+    render(); rcKick(); toast('Bonjour ' + n + ' !');
   };
   sheet(h('span', { class: 'who-title' }, 'Qui écoute sur', h('img', { src: 'logo.png', alt: 'BossPlay' }), '?'), [
-    h('div', { class: 'who-row' }, FAMILY.map(n => h('button', { class: 'who-p' + (n === sync.name ? ' on' : ''), onclick: () => choose(n) }, avEl(n), h('span', null, n + (n === 'Boss' ? ' 🔒' : ''))))),
-    h('div', { class: 'muted small', style: 'padding:0 12px 6px;text-align:center' }, sync.me ? 'Compte Google : ' + sync.me.email : ''),
-    sync.name ? { label: '🖼 Changer mon avatar', fn: () => avGallery() } : null,
+    h('div', { class: 'who-row' }, FAMILY.map(n => h('button', { class: 'who-p' + (n === sync.name ? ' on' : ''), onclick: () => choose(n) }, avEl(n), h('span', null, n + (n === 'Boss' || (kid && n === 'Sam') ? ' 🔒' : ''))))),
+    kid ? null : h('div', { class: 'muted small', style: 'padding:0 12px 6px;text-align:center' }, sync.me ? 'Compte Google : ' + sync.me.email : ''),
+    sync.name ? { label: 'Changer mon avatar', fn: () => avGallery() } : null,
+    kid ? { label: 'Thème : ' + ({ auto: 'automatique', dark: 'nuit', light: 'jour' })[S.theme] + ' (toucher pour changer)', fn: () => $('#theme').click() } : null,
+    kid ? { label: 'Mettre à jour la musique', fn: async () => { if (!hasToken() && !(await connect())) return; toast('Mise à jour de la musique…'); await scan(); store.set('lastScan', Date.now()); toast('Musique à jour'); } } : null,
     isBoss() ? { label: '🔒 Changer le code de Boss', fn: () => pinDialog('Code actuel', 'Pour changer le code, tape d\'abord l\'actuel.', async c => {
-      if (store.get('bossPin', '') && await pinHash(c) !== store.get('bossPin', '')) { toast('Code faux.'); return; }
-      store.set('bossPin', ''); enterBoss();
+      const old = await pinHash(c);
+      if (store.get('bossPin', '') && old !== store.get('bossPin', '')) { toast('Code faux.'); return; }
+      pinDialog('Nouveau code', '4 à 6 chiffres. Il vaudra sur tous les appareils de la famille.', c1 => pinDialog('Confirmer le code', 'Retape le même code.', async c2 => {
+        if (c1 !== c2) return toast('Les deux codes sont différents : rien n\'a changé.');
+        const hh = await pinHash(c1);
+        try { const j = await pinAsk({ op: 'set', h: hh, old }); if (!j.match) return toast(j.wait ? 'Trop d\'essais : réessaie plus tard.' : 'Refusé par le serveur : code actuel différent.'); }
+        catch { return toast('Internet nécessaire pour changer le code.'); }
+        store.set('bossPin', hh); toast('Code de Boss changé');
+      }));
     }) } : null,
   ]);
 }
@@ -713,14 +756,15 @@ if ('mediaSession' in navigator) {
 
 // ---------- Interface ----------
 const ui = { tab: 'albums', stack: [], q: '', loading: false, songLimit: 400 };
-function go(tab) { ui.tab = tab; ui.stack = []; ui.songLimit = 400; $('#search').value = ui.q = ''; render(); }
+function go(tab) { if (tab === 'settings' && isKid()) { toast('Les réglages sont réservés aux parents.'); return; } ui.tab = tab; ui.stack = []; ui.songLimit = 400; $('#search').value = ui.q = ''; render(); }
 function openPage(page) { ui.stack.push(page); render(); $('#view').scrollTop = 0; }
 function back() { ui.stack.pop(); render(); }
 function filt(list, text) { if (!ui.q) return list; const q = fold(ui.q); return list.filter(x => fold(text(x)).includes(q)); }
 
 function render() {
   const who = $('#who'); who.hidden = !sync.name; who.replaceChildren(...(sync.name ? [avEl(sync.name, 'sm')] : []), sync.name + (isBoss() ? ' ★' : (sync.name === 'Boss' ? ' 🔒' : '')));
-  document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === ui.tab && !ui.stack.length));
+  if (isKid() && ui.tab === 'settings') ui.tab = 'albums';
+  document.querySelectorAll('#tabs button').forEach(b => { b.classList.toggle('on', b.dataset.tab === ui.tab && !ui.stack.length); if (b.dataset.tab === 'settings') b.hidden = isKid(); });
   $('#back').hidden = !ui.stack.length;
   const v = $('#view'); v.replaceChildren();
   const page = ui.stack[ui.stack.length - 1];
@@ -740,7 +784,7 @@ function viewEmpty(v) {
     h('p', { class: 'muted small', id: 'scanmsg' }, scanMsg),
     h('div', { class: 'btns' },
       S.rootId ? h('button', { class: 'btn', onclick: async () => { if (!hasToken() && !(await connect())) return; scan(); } }, 'Lire ma musique') : null,
-      h('button', { class: 'btn alt', onclick: () => go('settings') }, 'Réglages'),
+      isKid() ? null : h('button', { class: 'btn alt', onclick: () => go('settings') }, 'Réglages'),
       h('button', { class: 'btn alt', onclick: () => $('#files').click() }, 'Fichiers de l\'iPhone…'))));
 }
 function albumCell(a) {
@@ -1366,7 +1410,7 @@ function tvAddr(ask) {
   }
   return a;
 }
-const RELAY = 'https://radio.bossplay.workers.dev/relay/send';
+const RELAY = RBASE + '/relay/send';
 // Envoi par le relais Cloudflare (un seul toucher, rien ne s'ouvre) ; sinon, page de la télé sur le Wi-Fi.
 async function tvSend(q) {
   if (hasToken()) {
@@ -1413,7 +1457,7 @@ function tvSearch() {
 }
 $('#tvsearch').onclick = tvSearch;
 $('#tvsearch').oncontextmenu = e => { e.preventDefault(); tvAddr(true); };
-$('#remote').onclick = remoteSheet;
+$('#remote').onclick = () => remoteSheet();
 $('#full .lyr').onclick = () => {
   const box = $('#full .lyrics'), cov = $('#full .cover');
   const show = box.hidden; box.hidden = !show; cov.hidden = show; $('#full .lyr').classList.toggle('on', show);
@@ -1844,17 +1888,15 @@ function m3u(name, tracks) {
   toast('Playlist exportée (à placer à la racine de la clé USB)');
 }
 
-// ---------- Télécommande entre appareils (même compte Google, via le dossier caché du Drive) ----------
-const rc = { id: store.get('devId', null), files: {}, lastCmd: store.get('rcLastCmd', 0), timer: 0, pubTimer: 0, devices: [], target: null, poll: 0 };
+// ---------- Lecture partagée entre appareils (instantanée, par le relais BossPlay) ----------
+// Chaque appareil ouvert annonce ce qu'il joue et garde une requête ouverte vers le relais : un ordre arrive en moins d'une seconde.
+// Un profil ne voit que ses propres appareils ; Boss les voit tous.
+const rc = { id: store.get('devId', null), devices: [], seq: -1, skew: 0, loop: false, ctl: null, pubTimer: 0, lastPub: 0, denied: false, panel: null };
 if (!rc.id) { rc.id = Math.random().toString(36).slice(2, 10); store.set('devId', rc.id); }
 function devName() {
   if (S.devName) return S.devName;
   const u = navigator.userAgent;
   return /iPhone/.test(u) ? 'iPhone' : /iPad|Macintosh.*Mobile/.test(u) || (/Macintosh/.test(u) && navigator.maxTouchPoints > 1) ? 'iPad' : /Android/.test(u) ? 'Android' : /Mac/.test(u) ? 'Mac' : /Windows/.test(u) ? 'PC' : 'Navigateur';
-}
-async function rcFile(name) {
-  if (rc.files[name]) return rc.files[name];
-  const f = await appData(name); rc.files[name] = f ? f.id : null; return rc.files[name];
 }
 const pathOf = t => [(t.albumArtist || t.artist || '').replace(/\//g, '_'), (t.album || '').replace(/\//g, '_'), t.name].join('/');
 let pathMap = null, pathFor = null;
@@ -1867,104 +1909,198 @@ const resolveList = (ids, paths) => { const a = (ids || []).map(id => lib.byId.g
 function nowState() {
   const t = cur();
   if (radio.st) return { radio: radio.st.name, playing: !radio.el.paused };
-  return t ? { id: t.id, title: t.title, artist: t.artist, album: t.album, playing: !audio.paused, pos: audio.currentTime || 0, dur: audio.duration || 0, at: Date.now(),
-    queue: P.queue.slice(Math.max(0, P.i - 50), P.i + 200).map(x => x.id), paths: P.queue.slice(Math.max(0, P.i - 50), P.i + 200).map(pathOf), qi: Math.min(P.i, 50) } : null;
+  if (!t) return null;
+  const from = Math.max(0, P.i - 10), q = P.queue.slice(from, P.i + 60);
+  return { id: t.id, path: pathOf(t), title: t.title, artist: t.artist, album: t.album, playing: !audio.paused, pos: audio.currentTime || 0, dur: audio.duration || 0,
+    paths: q.map(pathOf), qi: P.i - from };
 }
+// Appels au relais : jamais par gfetch (un refus du relais ne doit pas déconnecter Google Drive).
+async function rfetch(path, body, signal) {
+  const r = await fetch(RBASE + path, { method: body ? 'POST' : 'GET', signal, body: body ? JSON.stringify(body) : undefined,
+    headers: Object.assign({ Authorization: 'Bearer ' + tok.t }, body ? { 'Content-Type': 'application/json' } : {}) });
+  if (r.status === 401) { rc.denied = true; throw new Error('Ce compte Google n\'est pas autorisé sur le serveur BossPlay.'); }
+  if (!r.ok) throw new Error('relais ' + r.status);
+  rc.denied = false;
+  return r.json();
+}
+const rcP = () => encodeURIComponent(sync.name || 'Famille');
+const rcSounding = () => !audio.paused || (radio.st && !radio.el.paused);
+const rcOn = () => !S.remoteOff && hasToken() && !!sync.name && !rc.denied && (document.visibilityState === 'visible' || rcSounding());
 function rcPublish(soon) {
   if (S.remoteOff) return;
   clearTimeout(rc.pubTimer); rc.pubTimer = setTimeout(async () => {
-    if (!hasToken() || document.visibilityState !== 'visible') return;
-    try { const name = 'bp-dev-' + rc.id + '.json'; rc.files[name] = await writeJson(name, { id: rc.id, name: devName(), who: sync.name, kind: 'pwa', at: Date.now(), now: nowState() }, await rcFile(name)); } catch { }
-  }, soon ? 300 : 2500);
+    if (!rcOn()) return;
+    rc.lastPub = Date.now();
+    try { await rfetch('/play/pub?p=' + rcP(), { dev: { id: rc.id, name: devName(), kind: 'pwa', who: sync.name }, now: nowState() }); } catch { }
+  }, soon ? 120 : 1200);
 }
-async function rcPoll() {
-  if (S.remoteOff || !hasToken() || document.visibilityState !== 'visible') return;
-  try {
-    const id = await rcFile('bp-cmd-' + rc.id + '.json'); if (!id) return;
-    const cmds = await readJson(id);
-    const todo = (Array.isArray(cmds) ? cmds : []).filter(c => c.at > rc.lastCmd);
-    if (!todo.length) return;
-    for (const c of todo) { rc.lastCmd = Math.max(rc.lastCmd, c.at); runCmd(c); }
-    store.set('rcLastCmd', rc.lastCmd);
-    await writeJson('bp-cmd-' + rc.id + '.json', [], id);
-    rcPublish(true);
-  } catch { }
+async function rcLoop() {
+  if (rc.loop) return; rc.loop = true;
+  let fail = 0;
+  while (rcOn()) {
+    try {
+      rc.ctl = new AbortController();
+      const j = await rfetch('/play/wait?p=' + rcP() + '&dev=' + rc.id + '&since=' + rc.seq + (isBoss() ? '&all=1' : ''), null, rc.ctl.signal);
+      fail = 0; rc.seq = j.seq; rc.skew = j.t - Date.now();
+      rc.devices = (j.devices || []).filter(d => d.id !== rc.id);
+      for (const c of j.cmds || []) { try { runCmd(c); } catch { } }
+      if ((j.cmds || []).length) rcPublish(true);
+      rcShow();
+    } catch (e) {
+      if (e.name === 'AbortError') continue;
+      fail++; await sleep(Math.min(30000, 500 * 2 ** fail));
+    }
+  }
+  rc.loop = false;
 }
+// À appeler quand le profil, la connexion ou l'affichage change : repart tout de suite avec les bons réglages.
+function rcKick() { rc.denied = false; rc.seq = -1; rc.devices = []; try { rc.ctl && rc.ctl.abort(); } catch { } rcShow(); rcLoop(); rcPublish(true); }
 function runCmd(c) {
   const a = c.arg;
+  const seekTo = pos => { if (audio.readyState >= 1) audio.currentTime = pos; else audio.addEventListener('canplay', () => { audio.currentTime = pos; }, { once: true }); };
   switch (c.cmd) {
     case 'toggle': radio.st ? (radio.el.paused ? radio.el.play() : radio.el.pause()) : toggle(); break;
     case 'pause': audio.pause(); radio.el.pause(); break;
+    case 'play': if (radio.st) radio.el.play().catch(() => { }); else if (audio.paused) toggle(); break;
     case 'next': next(true); break;
     case 'prev': prev(); break;
     case 'seek': audio.currentTime = Math.max(0, (audio.currentTime || 0) + (+a || 0)); break;
+    case 'seekTo': audio.currentTime = Math.max(0, +a || 0); break;
     case 'vol': audio.volume = radio.el.volume = Math.max(0, Math.min(1, audio.volume + (+a || 0))); break;
     case 'playIds': {
       const list = resolveList(a.ids, a.paths);
       if (!list.length) return toast('Ces titres ne sont pas dans la bibliothèque de cet appareil.');
       radioStop(); P.shuffle = false; play(list, Math.min(a.i || 0, list.length - 1));
-      if (a.pos) audio.addEventListener('canplay', function f() { audio.removeEventListener('canplay', f); audio.currentTime = a.pos; }, { once: true });
+      if (a.pos) audio.addEventListener('canplay', () => { audio.currentTime = a.pos; }, { once: true });
       toast('▶ Lecture reçue de ' + (c.from || 'un autre appareil')); break;
     }
   }
 }
-async function rcDevices() {
-  const j = await drive('files', { spaces: 'appDataFolder', q: "name contains 'bp-dev-' and trashed=false", fields: 'files(id,name,modifiedTime)', pageSize: 50 });
-  const fresh = (j.files || []).filter(f => Date.now() - Date.parse(f.modifiedTime) < 30 * 60000 && f.name !== 'bp-dev-' + rc.id + '.json');
-  const out = [];
-  for (const f of fresh) { try { const d = await readJson(f.id); d.seen = Date.parse(f.modifiedTime); out.push(d); } catch { } }
-  return out.sort((a, b) => b.seen - a.seen);
-}
 async function sendCmd(dev, cmd, arg) {
-  const name = 'bp-cmd-' + dev.id + '.json';
-  let id = await rcFile(name), list = [];
-  if (id) { try { list = await readJson(id); } catch { list = []; } }
-  list = (Array.isArray(list) ? list : []).filter(c => Date.now() - c.at < 120000);
-  list.push({ cmd, arg, at: Date.now(), from: devName() });
-  rc.files[name] = await writeJson(name, list, id);
+  const j = await rfetch('/play/cmd?p=' + rcP(), { to: dev.id, cmd, arg, from: devName() });
+  if (!j.online) toast(dev.name + ' ne répond pas : BossPlay y est peut-être fermé.', 3500);
+  return j.online;
 }
-async function remoteSheet() {
-  if (!hasToken() && !(await connect())) return;
-  sheet('Télécommande', [h('div', { class: 'muted small', style: 'padding:0 12px' }, 'Recherche de tes appareils…')]);
-  try {
-    rc.devices = await rcDevices();
-    const ago = d => Math.max(0, Math.round((Date.now() - d.seen) / 60000));
-    sheet('Contrôler un autre appareil', [
-      h('div', { class: 'muted small', style: 'padding:0 12px 8px' }, 'Appareils BossPlay ouverts avec ton compte Google (' + (sync.me?.email || '') + '). Cet appareil : ' + devName() + '.'),
-      ...(rc.devices.length ? rc.devices.map(d => ({ label: d.name + (d.who ? ' (' + d.who + ')' : '') + ' — ' + (d.now ? (d.now.radio ? '📻 ' + d.now.radio : (d.now.playing ? '▶ ' : '⏸ ') + d.now.title) : 'à l\'arrêt') + (ago(d) > 2 ? ' · vu il y a ' + ago(d) + ' min' : ''), fn: () => remotePanel(d) }))
-        : [h('div', { style: 'padding:6px 12px' }, 'Aucun autre appareil trouvé. L\'autre appareil doit avoir BossPlay ouvert depuis moins de 30 minutes, avec le même compte Google. La tablette doit avoir été reliée à Google Drive depuis la version 1.8.1.')]),
-    ]);
-  } catch (e) { sheet('Télécommande', [h('div', { style: 'padding:0 12px' }, 'Impossible : ' + e.message)]); }
-}
-function remotePanel(d) {
+// Position estimée d'un autre appareil, à la seconde près (son dernier état + le temps écoulé depuis).
+function rcPos(d) {
   const n = d.now || {};
-  const btn = (label, cmd, arg) => h('button', { class: 'btn alt', onclick: async () => { try { await sendCmd(d, cmd, arg); toast('Envoyé à ' + d.name + ' (quelques secondes)'); } catch (e) { toast('Envoi impossible : ' + e.message); } } }, label);
-  sheet('📡 ' + d.name, [
-    h('div', { style: 'padding:0 12px 10px' }, h('b', null, n.radio ? '📻 ' + n.radio : n.title || 'À l\'arrêt'), n.artist ? h('div', { class: 'muted small' }, n.artist + ' — ' + n.album) : null),
-    h('div', { class: 'btns', style: 'padding:0 12px 10px' }, btn('⏮', 'prev'), btn('⏯', 'toggle'), btn('⏭', 'next'), btn('−15 s', 'seek', -15), btn('+15 s', 'seek', 15), btn('🔉', 'vol', -0.1), btn('🔊', 'vol', 0.1)),
-    cur() ? { label: '⇢ Envoyer ma musique sur ' + d.name, fn: async () => { const s = nowState(); await sendCmd(d, 'playIds', { ids: s.queue, paths: s.paths, i: s.qi, pos: s.pos }); audio.pause(); toast('Musique envoyée sur ' + d.name); } } : null,
-    n.queue || n.paths ? { label: '⇠ Reprendre ici ce qui joue sur ' + d.name, fn: async () => {
-      const list = resolveList(n.queue, n.paths); if (!list.length) return toast('Titres introuvables ici.');
-      radioStop(); P.shuffle = false; play(list, n.qi || 0);
-      const pos = (n.pos || 0) + (n.playing ? (Date.now() - (n.at || Date.now())) / 1000 : 0);
-      audio.addEventListener('canplay', function f() { audio.removeEventListener('canplay', f); audio.currentTime = pos; }, { once: true });
-      sendCmd(d, 'pause').catch(() => { });
-    } } : null,
+  const p = (n.pos || 0) + (n.playing ? Math.max(0, (Date.now() + rc.skew - (d.srv || 0)) / 1000) : 0);
+  return n.dur ? Math.min(p, n.dur) : p;
+}
+const mmss = x => { x = Math.max(0, Math.floor(x || 0)); return Math.floor(x / 60) + ':' + String(x % 60).padStart(2, '0'); };
+const rcTrack = n => (n && ((n.id && lib.byId.get(n.id)) || byPath(n.path))) || null;
+const rcKindIcon = k => k === 'tv' ? 'Télé' : k === 's8' ? 'Tablette' : k === 'mac' ? 'Mac' : 'Téléphone';
+const rcPlayingElse = () => rc.devices.find(d => d.now && d.now.playing && !d.now.radio) || rc.devices.find(d => d.now && d.now.playing) || null;
+// Reprend ici, au même endroit, ce qui joue sur l'appareil « d », et met « d » en pause.
+function rcTakeOver(d) {
+  const n = d.now || {};
+  const list = resolveList(n.queue, n.paths); if (!list.length) return toast('Ces titres ne sont pas dans la bibliothèque de cet appareil.');
+  const pos = rcPos(d);
+  radioStop(); P.shuffle = false; play(list, Math.min(n.qi || 0, list.length - 1));
+  audio.addEventListener('canplay', () => { audio.currentTime = pos; }, { once: true });
+  sendCmd(d, 'pause').catch(() => { });
+  $('#sheet').hidden = true;
+}
+// Envoie ma lecture sur l'appareil « d », au même endroit, et met cet appareil en pause.
+async function rcHandOff(d) {
+  const s = nowState(); if (!s || s.radio) return toast('Lance d\'abord un titre de ta musique.');
+  try { if (await sendCmd(d, 'playIds', { paths: s.paths, i: s.qi, pos: s.pos })) { audio.pause(); toast('La musique continue sur ' + d.name); } }
+  catch (e) { toast('Envoi impossible : ' + e.message); }
+}
+// Bandeau « en lecture sur un autre appareil » (au-dessus du lecteur), avec pochette et avancement en direct.
+function rcShow() {
+  const bar = $('#else'), d = S.remoteOff ? null : rcPlayingElse();
+  const show = !!d && !rcSounding();
+  bar.hidden = !show;
+  document.body.classList.toggle('has-else', show);
+  if (show) {
+    const n = d.now, key = d.id + '|' + (n.radio || n.path || n.title);
+    if (bar.dataset.key !== key) {
+      bar.dataset.key = key;
+      const t = rcTrack(n), art = $('.art', bar);
+      if (t) coverInto(art, t); else art.replaceChildren(h('span', { class: 'rlogo', style: 'font-size:20px' }, n.radio ? '📻' : '♪'));
+      $('.t', bar).textContent = n.radio || n.title || '';
+      $('.s', bar).textContent = 'En lecture sur ' + d.name + (n.artist ? ' · ' + n.artist : '');
+      $('.take', bar).hidden = !!n.radio;
+    }
+    bar.dataset.dev = d.id;
+  } else bar.dataset.key = '';
+  rcTick();
+  if (rc.panel && !$('#sheet').hidden && rc.panel.box.isConnected) { const d2 = rc.devices.find(x => x.id === rc.panel.id); if (d2) rcFill(d2); } else rc.panel = null;
+}
+function rcTick() {
+  const bar = $('#else');
+  if (!bar.hidden) { const d = rc.devices.find(x => x.id === bar.dataset.dev); if (d && d.now && d.now.dur) $('.fill', bar).style.width = (100 * rcPos(d) / d.now.dur).toFixed(2) + '%'; else $('.fill', bar).style.width = '0'; }
+  if (rc.panel && rc.panel.box.isConnected) {
+    const d = rc.devices.find(x => x.id === rc.panel.id), n = d && d.now;
+    if (n && n.dur) { rc.panel.fill.style.width = (100 * rcPos(d) / n.dur).toFixed(2) + '%'; rc.panel.time.textContent = mmss(rcPos(d)) + ' / ' + mmss(n.dur); }
+    else { rc.panel.fill.style.width = '0'; rc.panel.time.textContent = n && n.radio ? 'EN DIRECT' : ''; }
+  }
+}
+setInterval(rcTick, 1000);
+function rcFill(d) {
+  const P2 = rc.panel, n = d.now || {}, key = n.radio || n.path || n.title || '';
+  if (P2.key !== key) {
+    P2.key = key;
+    const t = rcTrack(n);
+    if (t) coverInto(P2.art, t); else P2.art.replaceChildren(h('span', { class: 'rlogo' }, n.radio ? '📻' : '♪'));
+    P2.title.textContent = n.radio || n.title || 'À l\'arrêt';
+    P2.sub.textContent = n.artist ? n.artist + ' — ' + (n.album || '') : '';
+  }
+  P2.play.textContent = n.playing ? '⏸' : '▶';
+  P2.take.hidden = !(n.paths && n.paths.length) || !!n.radio;
+}
+function remoteSheet(openId) {
+  if (!hasToken()) return connect().then(t => { if (t) { rcKick(); remoteSheet(openId); } });
+  if (S.remoteOff) return toast('La lecture partagée est désactivée sur cet appareil.');
+  if (!rc.loop) rcKick();
+  const d0 = openId && rc.devices.find(d => d.id === openId);
+  if (d0) return remotePanel(d0);
+  const line = d => { const n = d.now; return d.name + (d.who && d.who !== sync.name ? ' (' + d.who + ')' : '') + ' — ' + (n ? (n.radio ? '📻 ' + n.radio : (n.playing ? '▶ ' : '⏸ ') + n.title) : 'à l\'arrêt'); };
+  sheet('Mes appareils', [
+    h('div', { class: 'muted small', style: 'padding:0 12px 8px' }, 'Cet appareil : ' + devName() + ' · profil ' + sync.name + '.'),
+    ...(rc.devices.length ? rc.devices.map(d => ({ label: line(d), fn: () => remotePanel(d) }))
+      : [h('div', { style: 'padding:6px 12px' }, rc.denied ? 'Ce compte Google n\'est pas autorisé sur le serveur BossPlay.'
+        : 'Aucun autre appareil pour l\'instant. Ouvre BossPlay sur l\'autre appareil, avec le même profil (' + sync.name + ') : il apparaît ici en une ou deux secondes.'),
+        { label: 'Actualiser', fn: () => { rcKick(); setTimeout(() => remoteSheet(), 900); } }]),
   ]);
 }
-setInterval(rcPoll, 4000);
-setInterval(() => rcPublish(), 60000);
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { rcPublish(true); if (isBoss()) loadFamilyWishes(); } });
+function remotePanel(d) {
+  const send = async (cmd, arg, local) => { try { if (local) { local(); rcShow(); } await sendCmd(d, cmd, arg); } catch (e) { toast('Envoi impossible : ' + e.message); } };
+  const live = () => rc.devices.find(x => x.id === d.id) || d;
+  const btn = (label, cmd, arg, local) => h('button', { class: 'btn alt', onclick: () => send(cmd, arg, local) }, label);
+  const art = h('div', { class: 'rc-art' }), title = h('b', null, ''), sub = h('div', { class: 'muted small' }, ''), fill = h('div', { class: 'fill' }), time = h('div', { class: 'muted small rc-time' }, '');
+  const bar = h('div', { class: 'rc-bar', onclick: e => { const n = live().now; if (!n || !n.dur) return; const r = bar.getBoundingClientRect(); const pos = n.dur * Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)); send('seekTo', pos, () => { n.pos = pos; live().srv = Date.now() + rc.skew; }); } }, fill);
+  const play = h('button', { class: 'btn', onclick: () => send('toggle', null, () => { const x = live(); if (x.now) { x.now.pos = rcPos(x); x.srv = Date.now() + rc.skew; x.now.playing = !x.now.playing; } }) }, '⏯');
+  const take = h('button', { class: 'it', onclick: () => rcTakeOver(live()) }, 'Continuer ici (sur ' + devName() + ')');
+  const box = h('div', { class: 'rc-now' }, art, h('div', { class: 'rc-meta' }, title, sub));
+  sheet(rcKindIcon(d.kind) + ' · ' + d.name, [
+    box, h('div', { style: 'padding:0 12px' }, bar, time),
+    h('div', { class: 'btns', style: 'padding:6px 12px 10px;justify-content:center' }, btn('⏮', 'prev'), play, btn('⏭', 'next'), btn('−15 s', 'seek', -15), btn('+15 s', 'seek', 15), btn('Vol −', 'vol', -0.1), btn('Vol +', 'vol', 0.1)),
+    take,
+    cur() && !radio.st ? { label: 'Envoyer ma musique sur ' + d.name, fn: () => rcHandOff(live()) } : null,
+  ]);
+  rc.panel = { id: d.id, box, art, title, sub, fill, time, play, take, key: null };
+  rcFill(live()); rcTick();
+}
+$('#else .meta').onclick = $('#else .art').onclick = () => remoteSheet($('#else').dataset.dev);
+$('#else .pp').onclick = () => { const d = rc.devices.find(x => x.id === $('#else').dataset.dev); if (d) sendCmd(d, 'pause').catch(() => { }); };
+$('#else .take').onclick = () => { const d = rc.devices.find(x => x.id === $('#else').dataset.dev); if (d) rcTakeOver(d); };
+audio.addEventListener('play', () => { rcPublish(true); rcLoop(); rcShow(); });
+audio.addEventListener('pause', () => { rcPublish(true); rcShow(); });
+audio.addEventListener('seeked', () => rcPublish(true));
+setInterval(() => { if (Date.now() - rc.lastPub > 25000) rcPublish(true); if (!rc.loop) rcLoop(); }, 10000);   // présence : « je suis toujours là »
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { rcKick(); if (isBoss()) loadFamilyWishes(); } });
 setInterval(() => { if (isBoss() && document.visibilityState === 'visible') loadFamilyWishes(); }, 10 * 60000);
 
 function extrasSettings() {
   const nm = h('input', { class: 'field', value: devName(), placeholder: 'Nom de cet appareil' });
-  return h('div', { class: 'card' }, h('h2', { style: 'margin-top:0' }, 'Télécommande et radio'),
-    h('div', { class: 'muted small' }, 'Nom de cet appareil (pour la télécommande) :'),
+  return h('div', { class: 'card' }, h('h2', { style: 'margin-top:0' }, 'Mes appareils'),
+    h('div', { class: 'muted small' }, 'Nom de cet appareil :'),
     h('div', { class: 'row', style: 'margin:6px 0 10px' }, nm, h('button', { class: 'btn', onclick: () => { S.devName = nm.value.trim(); saveS(); rcPublish(true); toast('Nom enregistré'); } }, 'Enregistrer')),
-    h('div', { class: 'row' }, h('button', { class: 'pill' + (S.remoteOff ? '' : ' on'), onclick: () => { S.remoteOff = !S.remoteOff; saveS(); render(); } }, S.remoteOff ? 'Contrôle à distance : non' : 'Contrôle à distance : oui'),
-      h('button', { class: 'pill', onclick: remoteSheet }, '📡 Contrôler un autre appareil')),
-    h('p', { class: 'muted small' }, 'Fonctionne entre tes appareils connectés au même compte Google, quand BossPlay est ouvert à l\'écran (quelques secondes de délai).'),
+    h('div', { class: 'row' }, h('button', { class: 'pill' + (S.remoteOff ? '' : ' on'), onclick: () => { S.remoteOff = !S.remoteOff; saveS(); render(); rcKick(); } }, S.remoteOff ? 'Lecture partagée : non' : 'Lecture partagée : oui'),
+      h('button', { class: 'pill', onclick: () => remoteSheet() }, h('span', { class: 'ic', html: $('#remote').innerHTML }), ' Mes appareils')),
+    h('p', { class: 'muted small' }, 'Lecture partagée : tes appareils ouverts sur le même profil se voient en direct. Tu peux mettre en pause, changer de titre, ou faire passer la musique de l\'un à l\'autre sans perdre l\'endroit où tu étais.'),
     playlists.length ? h('div', { class: 'btns' }, h('button', { class: 'pill', onclick: () => playlists.forEach(p => m3u(p.name, p.ids.map(id => lib.byId.get(id)).filter(Boolean))) }, 'Exporter mes playlists (M3U)')) : null);
 }
 
@@ -1981,4 +2117,5 @@ function extrasSettings() {
   if (S.clientId) initAuth();
   if (hasToken()) whoAmI();
   if (S.rootId && hasToken() && !raw) scan();
+  else if (S.rootId && hasToken() && Date.now() - store.get('lastScan', 0) > 24 * 3600000) { store.set('lastScan', Date.now()); scan(); }   // au plus une fois par jour
 })();
