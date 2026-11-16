@@ -2,7 +2,7 @@
    Paroles : LRCLIB. Clips : YouTube (lecteur officiel intégré, ou l'appli YouTube / YouTube Music). */
 'use strict';
 
-const VERSION = '1.5.0';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
+const VERSION = '1.6.0';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
 const YT_KEY = 'AIzaSyDoAxJzDHTkIPDqZbVcLr2Aguu40kPZqio';            // clé « BossPlayPWA » (limitée à bosseagle-la.github.io)
 // Lecture de la musique + dossier caché de BossPlay (profil de chacun) + fichiers créés par BossPlay (index de la bibliothèque).
 const SCOPE = 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file';
@@ -690,6 +690,11 @@ function shuffleRest() {
   P.queue = P.queue.slice(0, P.i + 1).concat(rest);
 }
 async function load(autoplay = true) {
+  if (!navigator.onLine && cur() && !isKept(cur())) {
+    const j = P.queue.findIndex((x, k) => k > P.i && isKept(x));
+    if (j < 0) { P.error = 'Pas d\'Internet : ce titre n\'est pas sur l\'appareil.'; updatePlayer(); return; }
+    P.i = j;
+  }
   const t = cur(); if (!t) return;
   if (radio.st) radioStop();
   const seq = ++P.seq;
@@ -773,8 +778,8 @@ function render() {
     if (page.artist) return viewArtist(v, lib.artistByKey.get(page.artist));
     if (page.playlist) return viewPlaylist(v, playlists.find(p => p.id === page.playlist));
   }
-  if (!lib.tracks.length && !localTracks.length && !['settings', 'radio', 'wishes'].includes(ui.tab)) return viewEmpty(v);
-  ({ albums: viewAlbums, artists: viewArtists, songs: viewSongs, favs: viewFavs, playlists: viewPlaylists, radio: viewRadio, wishes: viewWishes, stats: viewStats, settings: viewSettings })[ui.tab](v);
+  if (!lib.tracks.length && !localTracks.length && !['settings', 'radio', 'wishes', 'kept'].includes(ui.tab)) return viewEmpty(v);
+  ({ albums: viewAlbums, artists: viewArtists, songs: viewSongs, favs: viewFavs, playlists: viewPlaylists, radio: viewRadio, wishes: viewWishes, stats: viewStats, settings: viewSettings, kept: viewKept })[ui.tab](v);
   tabBadge();
 }
 function viewEmpty(v) {
@@ -811,6 +816,7 @@ function trackRow(t, list, i, opts = {}) {
     h('div', { class: 'no' }, playing ? h('span', { class: 'eq' }, '▮▮') : (opts.num ? (t.no || i + 1) : i + 1)),
     h('div', { class: 'm' }, h('div', null, t.title), h('div', { class: 's' }, opts.album ? t.artist + ' — ' + t.album : t.artist)),
     favs.tracks.has(t.id) ? h('span', { style: 'color:var(--red)' }, '♥') : null,
+    offline.has(t.id) ? h('span', { class: 'kept', title: 'Sur cet appareil' }, '✓') : null,
     h('button', { class: 'x', onclick: e => { e.stopPropagation(); trackMenu(t, opts.playlist); } }, '⋯'));
 }
 function viewSongs(v) {
@@ -824,7 +830,6 @@ function viewSongs(v) {
 function viewAlbum(v, a) {
   if (!a) { v.append(h('p', null, 'Album introuvable.')); return; }
   const fav = favs.albums.has(a.id);
-  const kept = a.tracks.length && a.tracks.every(t => offline.has(t.id) || t.local);
   v.append(h('div', { class: 'hero' }, artBox('art', a, a.name),
     h('div', null,
       h('div', { class: 'muted small' }, 'ALBUM'), h('div', { class: 'h-t' }, a.name),
@@ -834,7 +839,7 @@ function viewAlbum(v, a) {
         h('button', { class: 'btn', onclick: () => play(a.tracks, 0) }, '▶ Lire'),
         h('button', { class: 'btn alt', onclick: () => { P.shuffle = true; play(a.tracks, Math.floor(Math.random() * a.tracks.length)); } }, 'Aléatoire'),
         h('button', { class: 'btn alt', onclick: () => { toggleFav('a', a.id); render(); } }, fav ? '♥ Favori' : '♡ Favori'),
-        a.tracks[0]?.local ? null : h('button', { class: 'btn alt', onclick: () => kept ? unkeep(a) : keep(a) }, kept ? 'Retirer de l\'appareil' : 'Garder hors ligne')))),
+        a.tracks[0]?.local ? null : keepBtn(a.name, a.tracks)))),
     h('div', { class: 'list' }, a.tracks.map((t, i) => trackRow(t, a.tracks, i, { num: true }))));
 }
 function viewArtist(v, ar) {
@@ -842,13 +847,15 @@ function viewArtist(v, ar) {
   const all = ar.albums.flatMap(a => a.tracks);
   v.append(h('h1', null, ar.name),
     h('div', { class: 'btns', style: 'margin-bottom:16px' }, h('button', { class: 'btn', onclick: () => play(all, 0) }, '▶ Tout lire'),
-      h('button', { class: 'btn alt', onclick: () => { P.shuffle = true; play(all, Math.floor(Math.random() * all.length)); } }, 'Aléatoire')),
+      h('button', { class: 'btn alt', onclick: () => { P.shuffle = true; play(all, Math.floor(Math.random() * all.length)); } }, 'Aléatoire'), keepBtn(ar.name, all)),
     h('div', { class: 'grid' }, ar.albums.map(albumCell)));
 }
 function viewFavs(v) {
   const ts = [...favs.tracks].map(id => lib.byId.get(id)).filter(Boolean);
   const als = [...favs.albums].map(id => lib.albumById.get(id)).filter(Boolean);
   v.append(h('h1', null, 'Favoris'));
+  const favAll = ts.concat(als.flatMap(a => a.tracks).filter(t => !favs.tracks.has(t.id)));
+  if (favAll.length) v.append(h('div', { class: 'btns', style: 'margin-bottom:12px' }, keepBtn('Mes favoris', favAll)));
   if (als.length) v.append(h('h2', null, 'Albums'), h('div', { class: 'grid' }, als.map(albumCell)));
   v.append(h('h2', null, 'Titres'), ts.length ? h('div', { class: 'list' }, ts.map((t, i) => trackRow(t, ts, i, { album: true }))) : h('p', { class: 'muted' }, 'Touche ⋯ sur un titre › Favori.'));
 }
@@ -864,6 +871,7 @@ function viewPlaylist(v, p) {
   v.append(h('h1', null, p.name),
     h('div', { class: 'btns', style: 'margin-bottom:12px' },
       h('button', { class: 'btn', onclick: () => play(ts, 0) }, '▶ Lire'),
+      keepBtn(p.name, ts),
       h('button', { class: 'btn alt', onclick: () => m3u(p.name, ts) }, 'Exporter M3U'),
       h('button', { class: 'btn alt', onclick: () => { const n = prompt('Nouveau nom', p.name); if (n) { p.name = n.trim().slice(0, 80) || p.name; savePl(p); render(); } } }, 'Renommer'),
       h('button', { class: 'btn alt', onclick: () => { if (confirm('Supprimer « ' + p.name + ' » ?')) { plDeleted[p.id] = Date.now(); playlists = playlists.filter(x => x !== p); savePl(); back(); } } }, 'Supprimer')),
@@ -895,6 +903,7 @@ function trackMenu(t, pl) {
     { label: fav ? 'Retirer des favoris' : 'Ajouter aux favoris', fn: () => { toggleFav('t', t.id); render(); updatePlayer(); } },
     { label: 'Ajouter à une playlist…', fn: () => sheet('Ajouter à une playlist', [{ label: '+ Nouvelle playlist…', fn: () => newPlaylist([t.id]) },
       ...playlists.map(p => ({ label: p.name, fn: () => { if (!p.ids.includes(t.id)) p.ids.push(t.id); savePl(p); toast('Ajouté à « ' + p.name + ' »'); } }))]) },
+    t.local ? null : offline.has(t.id) ? { label: 'Retirer de cet appareil', fn: () => unkeepTracks([t]) } : { label: 'Garder sur cet appareil', fn: () => keepTracks(t.title, [t]) },
     { label: 'Clip vidéo…', fn: () => clipPicker(t) },
     !t.local ? { label: 'Aller à l\'album', fn: () => openPage({ album: t.albumId }) } : null,
     lib.artistByKey.has(fold(t.artist)) ? { label: 'Aller à l\'artiste', fn: () => openPage({ artist: fold(t.artist) }) } : null,
@@ -902,27 +911,97 @@ function trackMenu(t, pl) {
   ]);
 }
 
-// Hors ligne : titres gardés dans le stockage de l'appareil (lecture sans réseau).
-async function keep(a) {
-  const c = await cacheOpen('bp-offline'); if (!c) return toast('Stockage indisponible sur cet appareil.');
-  let n = 0;
-  toast('Copie de « ' + a.name + ' » sur l\'appareil…', 60000);
-  for (const t of a.tracks) {
-    try {
-      if (!offline.has(t.id)) {
-        const r = await drive('files/' + t.id, { alt: 'media' }, true);
-        await c.put('https://bossplay.local/off/' + t.id, new Response(await r.blob()));
-        offline.add(t.id); saveOff();
-      }
-      toast(`Copie : ${++n}/${a.tracks.length}`, 60000);
-    } catch (e) { toast('Copie interrompue (' + e.message + ')'); render(); return; }
-  }
-  toast('« ' + a.name + ' » est disponible hors ligne'); render();
-}
-async function unkeep(a) {
+// ---------- Ma musique téléchargée ----------
+// Chacun choisit ce qu'il garde sur SON appareil (album, artiste, playlist, favoris ou un seul titre) : lecture sans Internet.
+// Les copies restent sur l'appareil quel que soit le profil choisi ; rien n'est envoyé ailleurs.
+const dl = { queue: [], busy: false, stop: false, done: 0, total: 0, name: '' };
+const offUrl = id => 'https://bossplay.local/off/' + id;
+const isKept = t => t.local || offline.has(t.id);
+const fmtBytes = b => b >= 1e9 ? (b / 1e9).toFixed(1).replace('.', ',') + ' Go' : Math.max(1, Math.round(b / 1e6)) + ' Mo';
+async function freeSpace() { try { const e = await navigator.storage.estimate(); return e.quota ? e.quota - e.usage : null; } catch { return null; } }
+// Ajoute des titres à la liste à télécharger ; un seul téléchargement à la fois, deux titres en parallèle.
+async function keepTracks(name, tracks) {
+  const todo = tracks.filter(t => !t.local && !offline.has(t.id) && !dl.queue.some(x => x.id === t.id));
+  if (!todo.length) { toast('« ' + name + ' » est déjà sur cet appareil'); return; }
+  if (!hasToken() && !(await connect())) return;
+  const need = todo.reduce((n, t) => n + (t.size || 8e6), 0), free = await freeSpace();
+  if (free != null && need > free * 0.9) return toast('Pas assez de place sur cet appareil : il faut environ ' + fmtBytes(need) + ', il reste ' + fmtBytes(free) + '.', 5000);
+  dl.queue.push(...todo); dl.total += todo.length; dl.name = name;
+  toast('Téléchargement de « ' + name + ' » (' + todo.length + ' titre' + (todo.length > 1 ? 's' : '') + ', ' + fmtBytes(need) + ')');
+  try { navigator.storage?.persist?.(); } catch { }
+  if (dl.busy) return render();
+  dl.busy = true; dl.stop = false; render();
   const c = await cacheOpen('bp-offline');
-  for (const t of a.tracks) { offline.delete(t.id); if (c) await c.delete('https://bossplay.local/off/' + t.id); }
-  saveOff(); toast('Retiré de l\'appareil'); render();
+  if (!c) { dl.busy = false; dl.queue = []; dl.total = dl.done = 0; return toast('Stockage indisponible sur cet appareil.'); }
+  let failed = 0;
+  const worker = async () => {
+    while (dl.queue.length && !dl.stop) {
+      const t = dl.queue.shift();
+      try {
+        if (!offline.has(t.id)) {
+          const r = await drive('files/' + t.id, { alt: 'media' }, true);
+          await c.put(offUrl(t.id), new Response(await r.blob()));
+          offline.add(t.id); saveOff();
+        }
+      } catch (e) { failed++; if (e.message === 'auth' || /quota/i.test(e.name + e.message)) dl.stop = true; }
+      dl.done++; dlShow();
+    }
+  };
+  await Promise.all([worker(), worker()]);
+  const stopped = dl.stop, left = dl.queue.length;
+  dl.busy = false; dl.queue = []; dl.total = dl.done = 0; dl.stop = false;
+  toast(stopped ? 'Téléchargement arrêté' + (left ? ' (' + left + ' titre(s) non copiés)' : '') : failed ? failed + ' titre(s) n\'ont pas pu être copiés : réessaie plus tard.' : 'C\'est sur ton appareil : tu peux l\'écouter sans Internet.', 4000);
+  render();
+}
+async function unkeepTracks(tracks, say = true) {
+  const c = await cacheOpen('bp-offline');
+  for (const t of tracks) { if (t.local) continue; offline.delete(t.id); if (c) await c.delete(offUrl(t.id)); }
+  saveOff(); if (say) toast('Retiré de cet appareil'); render();
+}
+const keep = a => keepTracks(a.name, a.tracks);
+const unkeep = a => unkeepTracks(a.tracks);
+// Bouton « Garder sur cet appareil » / « Retirer de l'appareil » pour un groupe de titres (album, artiste, playlist, favoris).
+function keepBtn(name, tracks) {
+  const own = tracks.filter(t => !t.local);
+  if (!own.length) return null;
+  const n = own.filter(t => offline.has(t.id)).length, waiting = own.some(t => dl.queue.some(x => x.id === t.id));
+  if (waiting) return h('button', { class: 'btn alt', onclick: () => go('kept') }, 'Téléchargement…');
+  if (n === own.length) return h('button', { class: 'btn alt', onclick: () => { if (confirm('Retirer « ' + name + ' » de cet appareil ?')) unkeepTracks(own); } }, '✓ Sur l\'appareil');
+  return h('button', { class: 'btn alt', onclick: () => keepTracks(name, own) }, n ? 'Garder le reste (' + (own.length - n) + ')' : 'Garder sur cet appareil');
+}
+function dlShow() {
+  const el = $('#dlbar'); if (!el) return;
+  el.textContent = dl.busy ? 'Téléchargement : ' + dl.done + ' / ' + dl.total + ' titres' : '';
+  const f = $('#dlfill'); if (f) f.style.width = dl.total ? (100 * dl.done / dl.total).toFixed(1) + '%' : '0';
+}
+function viewKept(v) {
+  const kept = lib.tracks.filter(t => offline.has(t.id));
+  const bytes = kept.reduce((n, t) => n + (t.size || 0), 0);
+  const albums = lib.albums.filter(a => a.tracks.some(t => offline.has(t.id)));
+  const all = kept.concat(localTracks);
+  const info = h('p', { class: 'muted small' }, kept.length + ' titre' + (kept.length > 1 ? 's' : '') + ' · ' + (bytes ? fmtBytes(bytes) : '0 Mo'));
+  freeSpace().then(f => { if (f != null && info.isConnected) info.textContent += ' · encore ' + fmtBytes(f) + ' de libre'; });
+  v.append(h('h1', null, 'Ma musique téléchargée'), info,
+    dl.busy ? h('div', { class: 'card' },
+      h('div', { id: 'dlbar', class: 'small' }), h('div', { class: 'rc-bar', style: 'margin:8px 0' }, h('div', { id: 'dlfill', class: 'fill' })),
+      h('button', { class: 'pill', onclick: () => { dl.stop = true; toast('Arrêt après les titres en cours…'); } }, 'Arrêter')) : null,
+    all.length ? h('div', { class: 'btns', style: 'margin-bottom:12px' },
+      h('button', { class: 'btn', onclick: () => play(all, 0) }, '▶ Tout lire'),
+      h('button', { class: 'btn alt', onclick: () => { P.shuffle = true; play(all, Math.floor(Math.random() * all.length)); } }, 'Aléatoire')) : null,
+    !navigator.onLine ? h('p', { class: 'small', style: 'color:var(--accent)' }, 'Pas d\'Internet : seule la musique de cette page peut être écoutée.') : null);
+  if (!kept.length && !localTracks.length) {
+    v.append(h('div', { class: 'card' }, h('p', null, 'Rien pour l\'instant.'),
+      h('p', { class: 'muted small' }, 'Ouvre un album, un artiste, une playlist ou tes favoris et touche « Garder sur cet appareil ». La musique est alors copiée ici : tu peux l\'écouter même sans Internet (en voiture, en avion…).')));
+  } else {
+    v.append(h('div', { class: 'grid' }, albums.map(a => {
+      const n = a.tracks.filter(t => offline.has(t.id)).length;
+      const c = albumCell(a); c.append(h('div', { class: 'a' }, n === a.tracks.length ? '✓ Album complet' : n + ' / ' + a.tracks.length + ' titres')); return c;
+    })));
+    if (localTracks.length) v.append(h('h2', null, 'Fichiers de l\'appareil'), h('div', { class: 'list' }, localTracks.map((t, i) => trackRow(t, localTracks, i, { album: true }))));
+    if (kept.length) v.append(h('div', { class: 'btns', style: 'margin-top:18px' }, h('button', { class: 'btn alt', onclick: () => { if (confirm('Retirer toute la musique téléchargée de cet appareil ?')) unkeepTracks(kept); } }, 'Tout retirer de l\'appareil')));
+    v.append(h('p', { class: 'muted small', style: 'margin-top:14px' }, 'Sur iPhone et iPad, ouvre BossPlay de temps en temps (au moins une fois par mois) : iOS peut effacer les copies d\'une appli qu\'on n\'ouvre plus.'));
+  }
+  dlShow();
 }
 
 // Fichiers de l'iPhone (iCloud Drive dans l'app Fichiers) : choisis à la main, gardés dans l'appli si tu veux.
@@ -1801,7 +1880,7 @@ function updateBadges(t) {
   const d = audio.duration;
   const kbps = t.size && d ? Math.round(t.size * 8 / d / 1000) : 0;
   const multi = ['ac3', 'ec3', 'eac3', 'dts'].includes(ext);
-  const items = [fmtName, lossless ? 'Sans perte' : kbps ? kbps + ' kb/s' : '', multi ? '' : 'Stéréo', offline.has(t.id) ? 'Hors ligne' : ''];
+  const items = [fmtName, lossless ? 'Sans perte' : kbps ? kbps + ' kb/s' : '', multi ? '' : 'Stéréo', offline.has(t.id) ? 'Sur l\'appareil' : ''];
   const nodes = items.filter(Boolean).map((s, i) => h('span', { class: 'badge' + (i === 0 ? ' main' : '') }, s));
   if (ext === 'ac3') nodes.push(badgeImg('dolby_digital', 'Dolby Digital'));
   if (ext === 'ec3' || ext === 'eac3') nodes.push(h('span', { class: 'badge' }, 'DOLBY DIGITAL PLUS'));
@@ -2113,6 +2192,7 @@ function extrasSettings() {
   for (const t of store.get('localIndex', [])) localTracks.push(Object.assign({}, t));
   const raw = await idb.get('library');
   if (raw && raw.rootId === S.rootId) buildLib(raw); else for (const t of localTracks) lib.byId.set(t.id, t);
+  if (!navigator.onLine && (offline.size || localTracks.length)) ui.tab = 'kept';   // sans Internet : directement la musique téléchargée
   render(); banner();
   if (S.clientId) initAuth();
   if (hasToken()) whoAmI();

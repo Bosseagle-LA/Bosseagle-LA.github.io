@@ -197,3 +197,6 @@ h2{font-size:17px;margin:20px 0 10px}
 .rc-time{text-align:right;padding-top:4px}
 .pill .ic{display:inline-flex;vertical-align:-5px}
 .pill .ic svg{width:18px;height:18px}
+
+/* Ma musique téléchargée */
+.tr .kept{color:var(--accent);font-weight:800;margin:0 4px}
