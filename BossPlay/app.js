@@ -2,7 +2,7 @@
    Paroles : LRCLIB. Clips : YouTube (lecteur officiel intégré, ou l'appli YouTube / YouTube Music). */
 'use strict';
 
-const VERSION = '1.6.0';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
+const VERSION = '1.6.1';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
 const YT_KEY = 'AIzaSyDoAxJzDHTkIPDqZbVcLr2Aguu40kPZqio';            // clé « BossPlayPWA » (limitée à bosseagle-la.github.io)
 // Lecture de la musique + dossier caché de BossPlay (profil de chacun) + fichiers créés par BossPlay (index de la bibliothèque).
 const SCOPE = 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file';
@@ -1969,7 +1969,7 @@ function m3u(name, tracks) {
 
 // ---------- Lecture partagée entre appareils (instantanée, par le relais BossPlay) ----------
 // Chaque appareil ouvert annonce ce qu'il joue et garde une requête ouverte vers le relais : un ordre arrive en moins d'une seconde.
-// Un profil ne voit que ses propres appareils ; Boss les voit tous.
+// Les enfants ne voient que leurs propres appareils ; Boss et Sam les voient tous.
 const rc = { id: store.get('devId', null), devices: [], seq: -1, skew: 0, loop: false, ctl: null, pubTimer: 0, lastPub: 0, denied: false, panel: null };
 if (!rc.id) { rc.id = Math.random().toString(36).slice(2, 10); store.set('devId', rc.id); }
 function devName() {
@@ -2019,7 +2019,7 @@ async function rcLoop() {
   while (rcOn()) {
     try {
       rc.ctl = new AbortController();
-      const j = await rfetch('/play/wait?p=' + rcP() + '&dev=' + rc.id + '&since=' + rc.seq + (isBoss() ? '&all=1' : ''), null, rc.ctl.signal);
+      const j = await rfetch('/play/wait?p=' + rcP() + '&dev=' + rc.id + '&since=' + rc.seq + (isBoss() || sync.name === 'Sam' ? '&all=1' : ''), null, rc.ctl.signal);
       fail = 0; rc.seq = j.seq; rc.skew = j.t - Date.now();
       rc.devices = (j.devices || []).filter(d => d.id !== rc.id);
       for (const c of j.cmds || []) { try { runCmd(c); } catch { } }
