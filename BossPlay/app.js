@@ -2,7 +2,7 @@
    Paroles : LRCLIB. Clips : YouTube (lecteur officiel intégré, ou l'appli YouTube / YouTube Music). */
 'use strict';
 
-const VERSION = '1.6.2';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
+const VERSION = '1.8.0';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
 const YT_KEY = 'AIzaSyDoAxJzDHTkIPDqZbVcLr2Aguu40kPZqio';            // clé « BossPlayPWA » (limitée à bosseagle-la.github.io)
 // Lecture de la musique + dossier caché de BossPlay (profil de chacun) + fichiers créés par BossPlay (index de la bibliothèque).
 const SCOPE = 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file';
@@ -28,6 +28,18 @@ function h(tag, attrs, ...kids) {
   for (const k of kids.flat()) if (k != null && k !== false) e.append(k instanceof Node ? k : String(k));
   return e;
 }
+// Bouton lecture / pause : triangle vert pour lancer, deux barres orange pour mettre en pause.
+// Icône des clips : écran blanc aux coins arrondis, triangle rouge (actif) ou bleu (inactif).
+const CLIP_ICON = on => '<svg class="clipico' + (on ? ' on' : '') + '" viewBox="0 0 24 24" aria-hidden="true"><rect x="2.5" y="5" width="19" height="14" rx="4" fill="none" stroke="#fff" stroke-width="1.8"/><path class="tri" d="M10 9.2v5.6c0 .5.5.8.9.5l4.3-2.8a.6.6 0 0 0 0-1L10.9 8.7c-.4-.3-.9 0-.9.5z"/></svg>';
+const PLAY_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.8v12.4c0 .9 1 1.4 1.7.9l9.4-6.2a1.1 1.1 0 0 0 0-1.8L9.7 4.9C9 4.4 8 4.9 8 5.8z"/></svg>';
+const PAUSE_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1.4"/><rect x="14" y="5" width="4" height="14" rx="1.4"/></svg>';
+function setPP(el, playing) {
+  if (!el || el.dataset.st === (playing ? 'pause' : 'play')) return;
+  el.dataset.st = playing ? 'pause' : 'play';
+  el.innerHTML = playing ? PAUSE_SVG : PLAY_SVG;
+  el.classList.toggle('is-pause', playing); el.classList.toggle('is-play', !playing);
+  el.setAttribute('aria-label', playing ? 'Pause' : 'Lecture');
+}
 const fold = s => (s || '').normalize('NFD').replace(/\p{Mn}+/gu, '').toLowerCase();
 const fmt = sec => { sec = Math.max(0, Math.floor(sec || 0)); return Math.floor(sec / 60) + ':' + String(sec % 60).padStart(2, '0'); };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -36,10 +48,33 @@ function toast(msg, ms = 2600) {
   const t = $('#toast'); t.textContent = msg; t.hidden = false;
   clearTimeout(toast._t); toast._t = setTimeout(() => { t.hidden = true; }, ms);
 }
+// Données d'usage PRIVÉES, une copie par profil (Boss, Sam, Adam, Sofia) : favoris, playlists, écoutes, clips choisis,
+// radios favorites, envies, et l'état de leur sauvegarde. Le reste (bibliothèque, réglages de la source, musique
+// téléchargée sur l'appareil, code de Boss…) est commun à l'appareil.
+const PERSONAL = ['favTracks', 'favAlbums', 'favTs', 'playlists', 'plDeleted', 'history', 'clips', 'xRadios', 'xRadiosDel',
+  'xWishes', 'xWishDel', 'xBought', 'xHidden', 'xWishSeen', 'xWishFile', 'xWishShared', 'syncFileId', 'syncLast', 'syncDirty'];
+const PSET = new Set(PERSONAL);
+const rawGet = (k, d) => { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } };
+const pWho = () => rawGet('bp.profileName', '') || 'Boss';
+const pKey = k => 'bp.' + (PSET.has(k) ? 'p.' + pWho() + '.' : '') + k;
 const store = {
-  get(k, d) { try { const v = localStorage.getItem('bp.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
-  set(k, v) { try { localStorage.setItem('bp.' + k, JSON.stringify(v)); } catch { } },
+  get(k, d) { return rawGet(pKey(k), d); },
+  set(k, v) { try { localStorage.setItem(pKey(k), JSON.stringify(v)); } catch { } },
 };
+// Une seule fois : les données d'avant (communes à tous les profils de l'appareil) reviennent à leur vrai propriétaire.
+// Sur le compte Google de Boss (celui des enfants aussi), c'est Boss ; sur le compte de Sam, c'est Sam.
+(function migrateProfiles() {
+  if (localStorage.getItem('bp.pmig1')) return;
+  const name = rawGet('bp.profileName', '');
+  const owner = rawGet('bp.admin', false) || !name || ['Adam', 'Sofia'].includes(name) ? 'Boss' : name;
+  for (const k of PERSONAL) {
+    const v = localStorage.getItem('bp.' + k);
+    if (v == null) continue;
+    if (localStorage.getItem('bp.p.' + owner + '.' + k) == null) localStorage.setItem('bp.p.' + owner + '.' + k, v);
+    localStorage.removeItem('bp.' + k);
+  }
+  localStorage.setItem('bp.pmig1', '1');
+})();
 // Base IndexedDB (bibliothèque, paroles) : clé → valeur.
 const idb = {
   _p: null,
@@ -83,7 +118,10 @@ function setFav(kind, id, on) {
 function toggleFav(kind, id) { setFav(kind, id, !(kind === 't' ? favs.tracks : favs.albums).has(id)); }
 let playlists = store.get('playlists', []);
 let plDeleted = store.get('plDeleted', {});
-const savePl = (p) => { if (p) p.ts = Date.now(); store.set('playlists', playlists); store.set('plDeleted', plDeleted); markDirty(); };
+const savePl = (p) => {
+  if (p) p.ts = Date.now(); store.set('playlists', playlists); store.set('plDeleted', plDeleted); markDirty();
+  if (p && p.shared) { clearTimeout(savePl._t); savePl._t = setTimeout(() => { try { shareRefresh(p); } catch { } }, 2500); }
+};
 let playLog = store.get('history', []);     // écoutes : [{ id, at }]
 const offline = new Set(store.get('offline', []));      // titres gardés sur l'appareil
 const saveOff = () => store.set('offline', [...offline]);
@@ -234,7 +272,7 @@ function enterBoss(who = 'Boss') {
   const saved = store.get('bossPin', '');
   const become = () => {
     bossOk = who === 'Boss'; bossOk ? localStorage.setItem('bossOk', '1') : localStorage.removeItem('bossOk');
-    sync.name = who; store.set('profileName', who); markDirty(); render(); rcKick(); toast('Bonjour ' + who + ' !');
+    switchProfile(who).then(() => { render(); rcKick(); toast('Bonjour ' + who + ' !'); });
   };
   const create = () => pinDialog('Créer le code de Boss', 'Ce code protège les profils des adultes et les Réglages, sur tous les appareils de la famille.', c1 =>
     pinDialog('Confirmer le code', 'Retape le même code.', async c2 => {
@@ -326,17 +364,25 @@ function avGallery() {
     { label: '↻ Recharger les avatars', fn: () => avLoad(true) },
   ]);
 }
-function pickProfile() {
+function pickProfile(all) {
   const kid = isKid();
+  // Un enfant ne voit que son profil : changer d'avatar, de thème, mettre la musique à jour. Changer de profil demande le code.
+  if (kid && !all) return sheet(h('span', { class: 'who-title' }, 'Mon profil'), [
+    h('div', { class: 'who-row' }, h('button', { class: 'who-p on', onclick: () => { $('#sheet').hidden = true; avGallery(); } }, avEl(sync.name), h('span', null, sync.name))),
+    { label: 'Changer mon avatar', fn: () => avGallery() },
+    { label: 'Thème : ' + ({ auto: 'automatique', dark: 'nuit', light: 'jour' })[S.theme] + ' (toucher pour changer)', fn: () => $('#theme').click() },
+    { label: 'Mettre à jour la musique', fn: async () => { if (!hasToken() && !(await connect())) return; toast('Mise à jour de la musique…'); await scan(); store.set('lastScan', Date.now()); toast('Musique à jour'); } },
+    { label: '🔒 Changer de profil (code de Boss)', fn: () => pickProfile(true) },
+  ]);
   const choose = n => {
     if (n === sync.name && !(n === 'Boss' && !bossOk)) { $('#sheet').hidden = true; return; }
     $('#sheet').hidden = true;
     if (n === 'Boss' && !sync.admin) { toast('« Boss » est réservé au compte qui gère la musique.'); return; }
     if (n === 'Boss') return enterBoss('Boss');
-    if (kid && !KIDS.includes(n)) return enterBoss(n);          // d'un profil d'enfant vers un adulte : code de Boss
-    bossOk = false; localStorage.removeItem('bossOk'); sync.name = n; store.set('profileName', n); markDirty();
+    if (kid) return enterBoss(n);                               // quitter un profil d'enfant (vers n'importe qui) : code de Boss
+    bossOk = false; localStorage.removeItem('bossOk');
     if (KIDS.includes(n) && ui.tab === 'settings') ui.tab = 'albums';
-    render(); rcKick(); toast('Bonjour ' + n + ' !');
+    switchProfile(n).then(() => { rcKick(); toast('Bonjour ' + n + ' !'); });
   };
   sheet(h('span', { class: 'who-title' }, 'Qui écoute sur', h('img', { src: 'logo.png', alt: 'BossPlay' }), '?'), [
     h('div', { class: 'who-row' }, FAMILY.map(n => h('button', { class: 'who-p' + (n === sync.name ? ' on' : ''), onclick: () => choose(n) }, avEl(n), h('span', null, n + (n === 'Boss' || (kid && n === 'Sam') ? ' 🔒' : ''))))),
@@ -356,6 +402,29 @@ function pickProfile() {
       }));
     }) } : null,
   ]);
+}
+// Change de profil : la sauvegarde de l'ancien part d'abord, puis on charge les données du nouveau (sur l'appareil,
+// puis sa sauvegarde Google Drive). Ainsi chacun ne voit que ses favoris, ses playlists, ses écoutes et ses envies.
+async function switchProfile(n) {
+  if (!n || n === sync.name) return;
+  if (sync.name && sync.dirty && hasToken()) { try { await push(true); } catch { } }
+  sync.name = n; store.set('profileName', n);
+  reloadPersonal();
+  render();
+  if (hasToken()) pull().then(() => { render(); if (isBoss()) loadFamilyWishes(); }).catch(() => { });
+}
+function reloadPersonal() {
+  favTs = store.get('favTs', {});
+  favs.tracks = new Set(Object.keys(favTs).filter(k => k.startsWith('t:') && favTs[k] > 0).map(k => k.slice(2)));
+  favs.albums = new Set(Object.keys(favTs).filter(k => k.startsWith('a:') && favTs[k] > 0).map(k => k.slice(2)));
+  playlists = store.get('playlists', []); plDeleted = store.get('plDeleted', {});
+  playLog = store.get('history', []); clipCache = store.get('clips', {});
+  X.radios = store.get('xRadios', []); X.radiosDel = store.get('xRadiosDel', {});
+  X.wishes = store.get('xWishes', []); X.wishDel = store.get('xWishDel', {});
+  X.bought = store.get('xBought', {}); X.hidden = store.get('xHidden', {}); X.wishSeen = store.get('xWishSeen', 0);
+  X.family = []; X.newCount = 0;
+  sync.fileId = store.get('syncFileId', null); sync.last = store.get('syncLast', 0); sync.dirty = store.get('syncDirty', false); sync.error = '';
+  shared.lists = null;
 }
 function profileData() {
   return { v: 1, name: sync.name, updated: Date.now(), favTs, playlists, plDeleted, clips: clipCache, history: playLog,
@@ -380,9 +449,14 @@ function mergeProfile(r) {
   store.set('favTracks', [...favs.tracks]); store.set('favAlbums', [...favs.albums]); store.set('favTs', favTs);
   store.set('playlists', playlists); store.set('plDeleted', plDeleted); store.set('clips', clipCache); store.set('history', playLog);
 }
+// Sauvegarde du profil dans le dossier caché de BossPlay du compte Google : une par profil.
+// Le propriétaire du compte (Boss sur le compte de Boss, Sam sur le sien) garde l'ancien nom de fichier.
+function profileFileName(n = sync.name) {
+  return n === (sync.admin ? 'Boss' : 'Sam') ? PROFILE_FILE : 'bossplay-profil-' + (n || 'Boss') + '.json';
+}
 async function findProfileFile() {
   if (sync.fileId) return sync.fileId;
-  const j = await drive('files', { spaces: 'appDataFolder', q: `name='${PROFILE_FILE}' and trashed=false`, fields: 'files(id,modifiedTime)', pageSize: 10 });
+  const j = await drive('files', { spaces: 'appDataFolder', q: `name='${profileFileName()}' and trashed=false`, fields: 'files(id,modifiedTime)', pageSize: 10 });
   sync.fileId = j.files?.[0]?.id || null; store.set('syncFileId', sync.fileId);
   return sync.fileId;
 }
@@ -414,7 +488,7 @@ async function push(force) {
       r = await gfetch('https://www.googleapis.com/upload/drive/v3/files/' + id + '?uploadType=media', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body });
     }
     if (!id || r.status === 404) {
-      const meta = { name: PROFILE_FILE, parents: ['appDataFolder'] };
+      const meta = { name: profileFileName(), parents: ['appDataFolder'] };
       r = await gfetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', multipart(meta, body, 'application/json'));
       if (r.ok) { sync.fileId = (await r.json()).id; store.set('syncFileId', sync.fileId); }
     }
@@ -777,6 +851,7 @@ function render() {
     if (page.album) return viewAlbum(v, lib.albumById.get(page.album) || localAlbum());
     if (page.artist) return viewArtist(v, lib.artistByKey.get(page.artist));
     if (page.playlist) return viewPlaylist(v, playlists.find(p => p.id === page.playlist));
+    if (page.shared) return viewShared(v, page.shared);
   }
   if (!lib.tracks.length && !localTracks.length && !['settings', 'radio', 'wishes', 'kept'].includes(ui.tab)) return viewEmpty(v);
   ({ albums: viewAlbums, artists: viewArtists, songs: viewSongs, favs: viewFavs, playlists: viewPlaylists, radio: viewRadio, wishes: viewWishes, stats: viewStats, settings: viewSettings, kept: viewKept })[ui.tab](v);
@@ -859,11 +934,68 @@ function viewFavs(v) {
   if (als.length) v.append(h('h2', null, 'Albums'), h('div', { class: 'grid' }, als.map(albumCell)));
   v.append(h('h2', null, 'Titres'), ts.length ? h('div', { class: 'list' }, ts.map((t, i) => trackRow(t, ts, i, { album: true }))) : h('p', { class: 'muted' }, 'Touche ⋯ sur un titre › Favori.'));
 }
+// ---------- Playlists partagées avec la famille ----------
+// Les playlists de chacun restent privées. « Partager avec la famille » en publie une copie sur le relais BossPlay :
+// elle apparaît chez tout le monde (Mes playlists › Partagées par la famille), par exemple pour une fête.
+const shared = { lists: null, busy: false };
+async function sharedLoad(force) {
+  if (!hasToken() || shared.busy || (shared.lists && !force)) return shared.lists || [];
+  shared.busy = true;
+  try { const j = await rfetch('/share'); shared.lists = j.lists || []; } catch { shared.lists = shared.lists || []; }
+  shared.busy = false;
+  return shared.lists;
+}
+async function sharePlaylist(p, on) {
+  if (!hasToken() && !(await connect())) return;
+  try {
+    const ts = p.ids.map(id => lib.byId.get(id)).filter(Boolean);
+    const j = on ? await rfetch('/share', { op: 'put', list: { id: p.id, name: p.name, who: sync.name, ids: p.ids, paths: ts.map(pathOf) } })
+      : await rfetch('/share', { op: 'del', id: p.id });
+    shared.lists = j.lists || [];
+    p.shared = on; p.ts = Date.now(); store.set('playlists', playlists); markDirty();   // pas savePl : il republierait la playlist
+    toast(on ? '« ' + p.name + ' » est visible par toute la famille' : '« ' + p.name + ' » n\'est plus partagée');
+  } catch (e) { toast('Partage impossible : ' + e.message); }
+  render();
+}
+// Une playlist partagée modifiée : la copie publiée suit.
+function shareRefresh(p) { if (p && p.shared && hasToken()) sharePlaylist(p, true); }
 function viewPlaylists(v) {
   v.append(h('h1', null, 'Playlists'),
     h('div', { class: 'btns', style: 'margin-bottom:12px' }, h('button', { class: 'btn', onclick: () => newPlaylist([]) }, '+ Nouvelle playlist')),
-    h('div', { class: 'list' }, playlists.map(p => h('div', { class: 'tr', onclick: () => openPage({ playlist: p.id }) },
-      h('div', { class: 'no' }, '♫'), h('div', { class: 'm' }, h('div', null, p.name), h('div', { class: 's' }, p.ids.length + ' titres'))))));
+    h('h2', null, 'Mes playlists'),
+    playlists.length ? h('div', { class: 'list' }, playlists.map(p => h('div', { class: 'tr', onclick: () => openPage({ playlist: p.id }) },
+      h('div', { class: 'no' }, '♫'), h('div', { class: 'm' }, h('div', null, p.name), h('div', { class: 's' }, p.ids.length + ' titres' + (p.shared ? ' · partagée avec la famille' : ''))))))
+      : h('p', { class: 'muted' }, 'Aucune playlist pour l\'instant.'));
+  const box = h('div');
+  v.append(h('h2', null, 'Partagées par la famille'), box);
+  const fill = lists => {
+    const mine = new Set(playlists.map(p => p.id));
+    const others = (lists || []).filter(l => !mine.has(l.id));
+    box.replaceChildren(others.length ? h('div', { class: 'list' }, others.map(l => h('div', { class: 'tr', onclick: () => openPage({ shared: l.id }) },
+      h('div', { class: 'no' }, '♫'), h('div', { class: 'm' }, h('div', null, l.name), h('div', { class: 's' }, (l.who ? l.who + ' · ' : '') + (l.ids.length || l.paths.length) + ' titres')))))
+      : h('p', { class: 'muted small' }, hasToken() ? 'Personne n\'a partagé de playlist. Ouvre une de tes playlists et touche « Partager avec la famille ».' : 'Connecte-toi pour voir les playlists partagées.'));
+  };
+  fill(shared.lists);
+  sharedLoad(true).then(l => { if (box.isConnected) fill(l); });
+}
+function viewShared(v, id) {
+  const l = (shared.lists || []).find(x => x.id === id);
+  if (!l) { v.append(h('p', null, 'Playlist partagée introuvable.')); return; }
+  const fromIds = l.ids.map(i => lib.byId.get(i)).filter(Boolean);
+  const ts = fromIds.length >= l.paths.length ? fromIds : l.paths.map(byPath).filter(Boolean);
+  v.append(h('h1', null, l.name), h('p', { class: 'muted small' }, 'Partagée par ' + (l.who || 'la famille') + ' · ' + ts.length + ' titres'),
+    h('div', { class: 'btns', style: 'margin-bottom:12px' },
+      h('button', { class: 'btn', onclick: () => play(ts, 0) }, '▶ Lire'),
+      h('button', { class: 'btn alt', onclick: () => { P.shuffle = true; play(ts, Math.floor(Math.random() * ts.length)); } }, 'Aléatoire'),
+      h('button', { class: 'btn alt', onclick: () => {
+        const np = { id: 'pl' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), name: l.name, ids: ts.map(t => t.id) };
+        playlists.push(np); savePl(np); toast('Copiée dans tes playlists'); render();
+      } }, 'Copier dans mes playlists'),
+      l.who === sync.name || isBoss() ? h('button', { class: 'btn alt', onclick: async () => {
+        if (!confirm('Ne plus partager « ' + l.name + ' » ?')) return;
+        try { const j = await rfetch('/share', { op: 'del', id: l.id }); shared.lists = j.lists || []; back(); } catch (e) { toast('Impossible : ' + e.message); }
+      } }, 'Ne plus partager') : null),
+    h('div', { class: 'list' }, ts.map((t, i) => trackRow(t, ts, i, { album: true }))));
 }
 function viewPlaylist(v, p) {
   if (!p) { v.append(h('p', null, 'Playlist introuvable.')); return; }
@@ -872,9 +1004,10 @@ function viewPlaylist(v, p) {
     h('div', { class: 'btns', style: 'margin-bottom:12px' },
       h('button', { class: 'btn', onclick: () => play(ts, 0) }, '▶ Lire'),
       keepBtn(p.name, ts),
+      h('button', { class: 'btn alt', onclick: () => sharePlaylist(p, !p.shared) }, p.shared ? '✓ Partagée avec la famille' : 'Partager avec la famille'),
       h('button', { class: 'btn alt', onclick: () => m3u(p.name, ts) }, 'Exporter M3U'),
       h('button', { class: 'btn alt', onclick: () => { const n = prompt('Nouveau nom', p.name); if (n) { p.name = n.trim().slice(0, 80) || p.name; savePl(p); render(); } } }, 'Renommer'),
-      h('button', { class: 'btn alt', onclick: () => { if (confirm('Supprimer « ' + p.name + ' » ?')) { plDeleted[p.id] = Date.now(); playlists = playlists.filter(x => x !== p); savePl(); back(); } } }, 'Supprimer')),
+      h('button', { class: 'btn alt', onclick: () => { if (confirm('Supprimer « ' + p.name + ' » ?')) { if (p.shared) sharePlaylist(p, false); plDeleted[p.id] = Date.now(); playlists = playlists.filter(x => x !== p); savePl(); back(); } } }, 'Supprimer')),
     h('div', { class: 'list' }, ts.map((t, i) => trackRow(t, ts, i, { album: true, playlist: p }))));
 }
 function newPlaylist(ids) {
@@ -981,14 +1114,14 @@ function viewKept(v) {
   const all = kept.concat(localTracks);
   const info = h('p', { class: 'muted small' }, kept.length + ' titre' + (kept.length > 1 ? 's' : '') + ' · ' + (bytes ? fmtBytes(bytes) : '0 Mo'));
   freeSpace().then(f => { if (f != null && info.isConnected) info.textContent += ' · encore ' + fmtBytes(f) + ' de libre'; });
-  v.append(h('h1', null, 'Ma musique téléchargée'), info,
+  v.append(...[h('h1', null, 'Ma musique téléchargée'), info,
     dl.busy ? h('div', { class: 'card' },
       h('div', { id: 'dlbar', class: 'small' }), h('div', { class: 'rc-bar', style: 'margin:8px 0' }, h('div', { id: 'dlfill', class: 'fill' })),
       h('button', { class: 'pill', onclick: () => { dl.stop = true; toast('Arrêt après les titres en cours…'); } }, 'Arrêter')) : null,
     all.length ? h('div', { class: 'btns', style: 'margin-bottom:12px' },
       h('button', { class: 'btn', onclick: () => play(all, 0) }, '▶ Tout lire'),
       h('button', { class: 'btn alt', onclick: () => { P.shuffle = true; play(all, Math.floor(Math.random() * all.length)); } }, 'Aléatoire')) : null,
-    !navigator.onLine ? h('p', { class: 'small', style: 'color:var(--accent)' }, 'Pas d\'Internet : seule la musique de cette page peut être écoutée.') : null);
+    !navigator.onLine ? h('p', { class: 'small', style: 'color:var(--accent)' }, 'Pas d\'Internet : seule la musique de cette page peut être écoutée.') : null].filter(Boolean));   // append() écrirait « null »
   if (!kept.length && !localTracks.length) {
     v.append(h('div', { class: 'card' }, h('p', null, 'Rien pour l\'instant.'),
       h('p', { class: 'muted small' }, 'Ouvre un album, un artiste, une playlist ou tes favoris et touche « Garder sur cet appareil ». La musique est alors copiée ici : tu peux l\'écouter même sans Internet (en voiture, en avion…).')));
@@ -1045,8 +1178,7 @@ function updateRadioPlayer() {
   $('#mini').hidden = false;
   $('#mini .t').textContent = st.name;
   $('#mini .s').textContent = playing ? '📻 EN DIRECT' : 'Radio en pause';
-  $('#mini .play').textContent = playing ? '⏸' : '▶';
-  $('#full .play').textContent = playing ? '⏸' : '▶';
+  setPP($('#mini .play'), playing); setPP($('#full .play'), playing);
   $('#full .title').textContent = st.name;
   $('#full .artist').textContent = playing ? '📻 EN DIRECT' : 'Radio en pause';
   $('#full .album').textContent = st.tags || '';
@@ -1073,15 +1205,14 @@ function updatePlayer() {
   $('#mini .t').textContent = t.title;
   $('#mini .s').textContent = P.error || (ui.loading ? 'Chargement…' : t.artist + ' — ' + t.album);
   const playing = !audio.paused;
-  $('#mini .play').textContent = playing ? '⏸' : '▶';
-  $('#full .play').textContent = playing ? '⏸' : '▶';
+  setPP($('#mini .play'), playing); setPP($('#full .play'), playing);
   $('#full .title').textContent = t.title;
   $('#full .artist').textContent = t.artist;
   $('#full .album').textContent = t.album;
   $('#full .err').textContent = P.error;
   $('#full .shuffle').classList.toggle('on', P.shuffle);
   $('#full .repeat').classList.toggle('on', P.repeat > 0);
-  $('#full .repeat').textContent = P.repeat === 2 ? '🔂' : '🔁';
+  { const r = $('#full .repeat'), st = String(P.repeat); if (r.dataset.st !== st) { r.dataset.st = st; r.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2l3 3-3 3M4 11V9a4 4 0 0 1 4-4h12M7 22l-3-3 3-3M20 13v2a4 4 0 0 1-4 4H4"/>' + (P.repeat === 2 ? '<text x="12" y="15.5" font-size="8" font-weight="800" text-anchor="middle" fill="currentColor" stroke="none">1</text>' : '') + '</svg>'; } }
   $('#full .fav').textContent = favs.tracks.has(t.id) ? '♥ Favori' : '♡ Favori';
   $('#full .clip').classList.toggle('on', !!clipCache[t.id]?.chosen);
   if (lastCoverFor !== t.albumId) {
@@ -1272,7 +1403,7 @@ async function openClip() {
       playerVars: { autoplay: 1, controls: 0, playsinline: 1, rel: 0, fs: 0, iv_load_policy: 3, modestbranding: 1, origin: location.origin },
       events: {
         onReady: () => clipTrackChanged(),
-        onStateChange: e => { clip.playing = e.data === 1 || e.data === 3; $('#clip .play').textContent = clip.playing ? '⏸' : '▶'; if (e.data === 0) { if (S.clipAuto) next(true); else closeClip(); } },
+        onStateChange: e => { clip.playing = e.data === 1 || e.data === 3; setPP($('#clip .play'), clip.playing); if (e.data === 0) { if (S.clipAuto) next(true); else closeClip(); } },
         onError: e => {
           const info = clipCache[cur()?.id];
           const nid = info?.cands?.map(c => c.id).find(id => !clip.tried.has(id));
@@ -1326,7 +1457,7 @@ function showNoVideo(t) {
   const n = $('#clip .nov'); n.hidden = false;
   const box = h('div', { class: 'art' }); coverInto(box, t);
   n.replaceChildren(box, h('div', null, clip.msg || 'Pas de clip trouvé pour ce titre : la musique continue.'));
-  $('#clip .play').textContent = audio.paused ? '▶' : '⏸';
+  setPP($('#clip .play'), !audio.paused);
 }
 async function clipLyricsFor(t) {
   const side = $('#clip .side'); side._lines = null; side.replaceChildren();
@@ -1366,7 +1497,7 @@ function wakeBar() {
 $('#clip').addEventListener('pointerdown', wakeBar);
 $('#clip .close').onclick = closeClip;
 $('#clip .play').onclick = () => { if (clip.has) ytCmd(clip.playing ? 'pauseVideo' : 'playVideo'); else toggle(); setTimeout(() => showPlayState(), 50); };
-function showPlayState() { if (!clip.has) $('#clip .play').textContent = audio.paused ? '▶' : '⏸'; }
+function showPlayState() { if (!clip.has) setPP($('#clip .play'), !audio.paused); }
 $('#clip .prev').onclick = () => { if (clip.has && clip.time > 3000) ytCmd('seekTo', 0, true); else prev(); };
 $('#clip .next').onclick = () => next(true);
 $('#clip .seek').addEventListener('input', () => { tick.cdrag = true; });
@@ -1422,8 +1553,8 @@ function viewSettings(v) {
       h('div', { class: 'btns' }, h('button', { class: 'btn alt', onclick: () => $('#files').click() }, 'Ajouter des fichiers…'),
         localTracks.length ? h('button', { class: 'btn alt', onclick: () => openPage({ album: 'local' }) }, 'Voir (' + localTracks.length + ')') : null,
         localTracks.length ? h('button', { class: 'btn alt', onclick: clearLocal }, 'Tout retirer') : null)),
-    h('div', { class: 'card' }, h('h2', { style: 'margin-top:0' }, 'Clips vidéo'),
-      h('div', { class: 'muted small' }, 'Bouton « 🎬 Clip » du grand lecteur :'),
+    h('div', { class: 'card' }, h('h2', { style: 'margin-top:0', class: 'row' }, h('span', { class: 'ic', html: CLIP_ICON(true) }), 'Clips vidéo'),
+      h('div', { class: 'muted small row', style: 'gap:6px' }, h('span', { class: 'ic', html: CLIP_ICON(S.clipPlayer === 'integrated') }), 'Bouton « Clip » du grand lecteur :'),
       pills('clipPlayer', [['integrated', 'Dans BossPlay'], ['youtube', 'Appli YouTube'], ['music', 'Appli YouTube Music']]),
       h('div', { class: 'muted small', style: 'margin-top:10px' }, 'Paroles sur le clip :'),
       pills('clipLyrics', [['off', 'Sans paroles'], ['left', 'À gauche'], ['subs', 'Sous-titres']]),
@@ -1469,6 +1600,7 @@ $('#theme').onclick = () => { S.theme = { auto: 'dark', dark: 'light', light: 'a
 $('#search').addEventListener('input', e => { ui.q = e.target.value; if (!['albums', 'artists', 'songs'].includes(ui.tab)) ui.tab = 'songs'; ui.stack = []; render(); });
 $('#mini .meta').onclick = $('#mini .art').onclick = () => { $('#full').hidden = false; updatePlayer(); tick(); };
 $('#mini .play').onclick = $('#full .play').onclick = toggle;
+setPP($('#mini .play'), false); setPP($('#full .play'), false); setPP($('#clip .play'), false);
 $('#mini .next').onclick = $('#full .next').onclick = () => next(true);
 $('#mini .prev').onclick = $('#full .prev').onclick = prev;
 $('#full .close').onclick = () => { $('#full').hidden = true; };
@@ -1557,16 +1689,17 @@ const X = {
   radiosDel: store.get('xRadiosDel', {}),
   wishes: store.get('xWishes', []),          // mes envies [{ id, at, station, title, artist, note, by }]
   wishDel: store.get('xWishDel', {}),
-  bought: store.get('xBought', {}),          // Boss : envies achetées ou masquées { id: date }
+  bought: store.get('xBought', {}),          // Boss : envies achetées { id: date }
+  hidden: store.get('xHidden', {}),          // Boss : envies des autres retirées de sa liste { id: date }
   wishSeen: store.get('xWishSeen', 0),       // Boss : date de la dernière envie vue
   family: [],                                // Boss : envies de toute la famille [{ ...envie, who }]
   newCount: 0,
 };
 const saveX = () => {
   store.set('xRadios', X.radios); store.set('xRadiosDel', X.radiosDel); store.set('xWishes', X.wishes);
-  store.set('xWishDel', X.wishDel); store.set('xBought', X.bought); store.set('xWishSeen', X.wishSeen); markDirty();
+  store.set('xWishDel', X.wishDel); store.set('xBought', X.bought); store.set('xHidden', X.hidden); store.set('xWishSeen', X.wishSeen); markDirty();
 };
-function extraProfile() { return { radios: X.radios, radiosDel: X.radiosDel, wishes: X.wishes, wishDel: X.wishDel, bought: X.bought, wishSeen: X.wishSeen }; }
+function extraProfile() { return { radios: X.radios, radiosDel: X.radiosDel, wishes: X.wishes, wishDel: X.wishDel, bought: X.bought, hidden: X.hidden, wishSeen: X.wishSeen }; }
 function extraMerge(e) {
   if (!e || typeof e !== 'object') return;
   const mergeList = (mine, theirs, delMine, delTheirs, key = 'id') => {
@@ -1578,6 +1711,8 @@ function extraMerge(e) {
   X.radios = mergeList(X.radios, e.radios, X.radiosDel, e.radiosDel);
   X.wishes = mergeList(X.wishes, e.wishes, X.wishDel, e.wishDel).sort((a, b) => b.at - a.at);
   for (const [k, v] of Object.entries(e.bought || {})) if (!X.bought[k] || v > X.bought[k]) X.bought[k] = v;
+  for (const [k, v] of Object.entries(e.hidden || {})) if (!X.hidden[k] || v > X.hidden[k]) X.hidden[k] = v;
+  store.set('xHidden', X.hidden);
   X.wishSeen = Math.max(X.wishSeen, e.wishSeen || 0);
   store.set('xRadios', X.radios); store.set('xRadiosDel', X.radiosDel); store.set('xWishes', X.wishes);
   store.set('xWishDel', X.wishDel); store.set('xBought', X.bought); store.set('xWishSeen', X.wishSeen);
@@ -1689,6 +1824,11 @@ function addWish(w) {
   publishWishes();
   if (ui.tab === 'wishes') render();
 }
+// « Retirer » : ma propre envie est supprimée ; pour Boss, une envie d'un autre profil est masquée de sa liste.
+function removeWish(w, mine) {
+  if (mine) return delWish(w);
+  X.hidden[w.id] = Date.now(); saveX(); render(); toast('Retirée de ta liste');
+}
 function delWish(w) { X.wishes = X.wishes.filter(x => x.id !== w.id); X.wishDel[w.id] = Date.now(); saveX(); publishWishes(); render(); }
 // Chaque membre garde sa liste dans un fichier de SON Drive, partagé en lecture avec Boss (courriel de Google au 1er partage).
 async function adminEmail() {
@@ -1727,11 +1867,19 @@ async function loadFamilyWishes() {
     for (const f of j.files || []) {
       try {
         const d = await readJson(f.id);
-        if (d.email && d.email === sync.me?.email) continue;            // mes propres envies sont déjà dans X.wishes
+        if (f.id === store.get('xWishFile', null)) continue;            // mon propre fichier : déjà dans X.wishes
+        // (les enfants utilisent le compte Google de Boss : on se fie au profil écrit dans le fichier, pas à l'adresse)
         for (const w of d.wishes || []) all.push(Object.assign({}, w, { who: d.who || f.owners?.[0]?.displayName || '?' }));
       } catch { }
     }
-    X.family = all.sort((a, b) => b.at - a.at);
+    const seenW = new Set(X.wishes.map(w => w.id)), uniq = [];
+    for (const w of all.sort((a, b) => b.at - a.at)) {               // même envie vue sur plusieurs appareils : une seule ligne
+      const k = w.id && !seenW.has(w.id) ? w.id : null;
+      const sig = fold(w.who + '|' + (w.title || '') + '|' + (w.artist || ''));
+      if (!k || seenW.has(sig)) continue;
+      seenW.add(k); seenW.add(sig); uniq.push(w);
+    }
+    X.family = uniq;
     const fresh = X.family.filter(w => w.at > X.wishSeen && !X.bought[w.id]);
     X.newCount = fresh.length;
     tabBadge();
@@ -1771,12 +1919,12 @@ function wishRow(w, mine) {
     w.note ? h('div', { class: 'small' }, '« ' + w.note + ' »') : null,
     h('div', { class: 'row', style: 'margin-top:8px' }, h('button', { class: 'pill', onclick: () => copyWish(w) }, '📋 Copier'), ...(isBoss() ? buyLinks(w) : []),
       isBoss() ? h('button', { class: 'pill' + (done ? ' on' : ''), onclick: () => { if (done) delete X.bought[w.id]; else X.bought[w.id] = Date.now(); saveX(); render(); } }, done ? '✓ Acheté' : 'Marquer acheté') : null,
-      mine ? h('button', { class: 'pill', onclick: () => delWish(w) }, 'Retirer') : null));
+      mine || isBoss() ? h('button', { class: 'pill', onclick: () => removeWish(w, mine) }, 'Retirer') : null));
 }
 function viewWishes(v) {
   if (isBoss()) {
     if (X.newCount) { X.wishSeen = Date.now(); X.newCount = 0; saveX(); tabBadge(); }
-    const todo = X.family.concat(X.wishes.map(w => Object.assign({ who: 'Boss' }, w))).sort((a, b) => b.at - a.at);
+    const todo = X.family.filter(w => !X.hidden[w.id]).concat(X.wishes.map(w => Object.assign({ who: 'Boss' }, w))).sort((a, b) => b.at - a.at);
     const open = todo.filter(w => !X.bought[w.id]), done = todo.filter(w => X.bought[w.id]);
     v.append(h('h1', null, 'Liste d\'achats de la famille'),
       h('p', { class: 'muted small' }, 'Chansons retenues à la radio par Sam, Adam, Sofia et toi. Les membres partagent leur liste avec ton compte Google : tu reçois un courriel au premier partage, puis le badge « Envies » t\'avertit.'),
@@ -2128,7 +2276,7 @@ function rcFill(d) {
     P2.title.textContent = n.radio || n.title || 'À l\'arrêt';
     P2.sub.textContent = n.artist ? n.artist + ' — ' + (n.album || '') : '';
   }
-  P2.play.textContent = n.playing ? '⏸' : '▶';
+  setPP(P2.play, !!n.playing);
   P2.take.hidden = !(n.paths && n.paths.length) || !!n.radio;
 }
 function remoteSheet(openId) {

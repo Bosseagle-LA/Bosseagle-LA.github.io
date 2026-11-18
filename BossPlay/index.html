@@ -53,9 +53,9 @@
       <div class="art"></div>
       <div class="meta"><div class="t"></div><div class="s"></div></div>
       <button class="icon rwish" style="display:none" aria-label="Retenir ce titre">♥</button>
-      <button class="icon prev" aria-label="Précédent">⏮</button>
-      <button class="icon play big" aria-label="Lecture">▶</button>
-      <button class="icon next" aria-label="Suivant">⏭</button>
+      <button class="icon tb skip prev" aria-label="Précédent"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5h2v14H6zM20 5.6v12.8c0 .8-.9 1.3-1.5.8L9.6 12.8a1 1 0 0 1 0-1.6l8.9-6.4c.6-.5 1.5 0 1.5.8z"/></svg></button>
+      <button class="icon tb pp play big" aria-label="Lecture"></button>
+      <button class="icon tb skip next" aria-label="Suivant"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 5h2v14h-2zM4 5.6v12.8c0 .8.9 1.3 1.5.8l8.9-6.4a1 1 0 0 0 0-1.6L5.5 4.8C4.9 4.3 4 4.8 4 5.6z"/></svg></button>
       <button class="icon stop" style="display:none" aria-label="Arrêter la radio">⏹</button>
     </div>
   </div>
@@ -74,15 +74,15 @@
       <input class="seek" type="range" min="0" max="1000" value="0">
       <div class="times"><span class="cur">0:00</span><span class="dur">0:00</span></div>
       <div class="controls">
-        <button class="icon shuffle" aria-label="Aléatoire">🔀</button>
-        <button class="icon prev" aria-label="Précédent">⏮</button>
-        <button class="icon play huge" aria-label="Lecture">▶</button>
-        <button class="icon next" aria-label="Suivant">⏭</button>
-        <button class="icon repeat" aria-label="Répéter">🔁</button>
+        <button class="icon tb mode shuffle" aria-label="Aléatoire"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h3.5c2 0 3.2 1 4.3 2.8l2.4 4.4C14.3 16 15.5 17 17.5 17H21M17.5 4 21 7l-3.5 3M17.5 14 21 17l-3.5 3M3 17h3.5c1.3 0 2.2-.4 3-1.2M21 7h-3.5c-1.3 0-2.2.4-3 1.2"/></svg></button>
+        <button class="icon tb skip prev" aria-label="Précédent"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5h2v14H6zM20 5.6v12.8c0 .8-.9 1.3-1.5.8L9.6 12.8a1 1 0 0 1 0-1.6l8.9-6.4c.6-.5 1.5 0 1.5.8z"/></svg></button>
+        <button class="icon tb pp play huge" aria-label="Lecture"></button>
+        <button class="icon tb skip next" aria-label="Suivant"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 5h2v14h-2zM4 5.6v12.8c0 .8.9 1.3 1.5.8l8.9-6.4a1 1 0 0 0 0-1.6L5.5 4.8C4.9 4.3 4 4.8 4 5.6z"/></svg></button>
+        <button class="icon tb mode repeat" aria-label="Répéter"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2l3 3-3 3M4 11V9a4 4 0 0 1 4-4h12M7 22l-3-3 3-3M20 13v2a4 4 0 0 1-4 4H4"/></svg></button>
       </div>
       <div class="actions">
         <button class="pill lyr">Paroles</button>
-        <button class="pill clip">🎬 Clip</button>
+        <button class="pill clip"><svg class="clipico" viewBox="0 0 24 24" aria-hidden="true"><rect x="2.5" y="5" width="19" height="14" rx="4" fill="none" stroke="#fff" stroke-width="1.8"/><path class="tri" d="M10 9.2v5.6c0 .5.5.8.9.5l4.3-2.8a.6.6 0 0 0 0-1L10.9 8.7c-.4-.3-.9 0-.9.5z"/></svg> Clip</button>
         <button class="pill fav">♡ Favori</button>
         <button class="pill kara">🎤 Karaoké</button>
         <button class="pill sleep">⏾</button>
@@ -105,9 +105,9 @@
     <input class="seek" type="range" min="0" max="1000" value="0">
     <div class="crow">
       <div class="info"><div class="t"></div><div class="s"></div></div>
-      <button class="icon prev">⏮</button>
-      <button class="icon play big">⏸</button>
-      <button class="icon next">⏭</button>
+      <button class="icon tb skip prev"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5h2v14H6zM20 5.6v12.8c0 .8-.9 1.3-1.5.8L9.6 12.8a1 1 0 0 1 0-1.6l8.9-6.4c.6-.5 1.5 0 1.5.8z"/></svg></button>
+      <button class="icon tb pp play big"></button>
+      <button class="icon tb skip next"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 5h2v14h-2zM4 5.6v12.8c0 .8.9 1.3 1.5.8l8.9-6.4a1 1 0 0 0 0-1.6L5.5 4.8C4.9 4.3 4 4.8 4 5.6z"/></svg></button>
       <div class="tools">
         <button class="pill off minus">−0,5 s</button>
         <button class="pill off plus">+0,5 s</button>
