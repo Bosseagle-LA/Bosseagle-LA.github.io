@@ -2,7 +2,7 @@
    Paroles : LRCLIB. Clips : YouTube (lecteur officiel intégré, ou l'appli YouTube / YouTube Music). */
 'use strict';
 
-const VERSION = '1.8.0';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
+const VERSION = '1.9.0';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
 const YT_KEY = 'AIzaSyDoAxJzDHTkIPDqZbVcLr2Aguu40kPZqio';            // clé « BossPlayPWA » (limitée à bosseagle-la.github.io)
 // Lecture de la musique + dossier caché de BossPlay (profil de chacun) + fichiers créés par BossPlay (index de la bibliothèque).
 const SCOPE = 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file';
@@ -145,7 +145,7 @@ async function initAuth() {
   if (tokenClient || !S.clientId) return !!tokenClient;
   if (!(await loadGis())) return false;
   tokenClient = google.accounts.oauth2.initTokenClient({
-    client_id: S.clientId, scope: SCOPE,
+    client_id: S.clientId, scope: store.get('wide', false) ? SCOPE + ' ' + WIDE : SCOPE,
     callback: r => {
       if (r && r.access_token) {
         tok = { t: r.access_token, exp: Date.now() + (Number(r.expires_in || 3600) - 120) * 1000, scope: r.scope || '' };
@@ -164,6 +164,14 @@ async function connect() {
   if (!S.clientId) { toast('Ajoute d\'abord l\'ID client OAuth dans Réglages.'); go('settings'); return null; }
   if (!(await initAuth())) { toast('Impossible de charger la connexion Google (réseau ?).'); return null; }
   return new Promise(res => { tokenWaiters.push(res); tokenClient.requestAccessToken({ prompt: store.get('connected', false) ? '' : 'consent' }); store.set('connected', true); });
+}
+// Accès complet au Drive : seulement pour Boss, pour écrire la sauvegarde partagée avec le Mac, la S8 et la TV.
+const WIDE = 'https://www.googleapis.com/auth/drive';
+const hasWide = () => hasToken() && String(tok.scope || '').split(' ').includes(WIDE);
+async function connectWide() {
+  if (!(await initAuth())) return null;
+  store.set('wide', true);
+  return new Promise(res => { tokenWaiters.push(res); tokenClient.requestAccessToken({ scope: SCOPE + ' ' + WIDE, prompt: 'consent' }); });
 }
 async function token() {
   if (hasToken()) return tok.t;
@@ -230,6 +238,7 @@ async function whoAmI() {
       store.set('admin', sync.admin);
     }
     await pull();
+    bridge();
     avLoad(false);
     if (!sync.name) pickProfile();
     else if (sync.name === 'Boss' && sync.admin && !bossOk) enterBoss();
@@ -449,6 +458,88 @@ function mergeProfile(r) {
   store.set('favTracks', [...favs.tracks]); store.set('favAlbums', [...favs.albums]); store.set('favTs', favTs);
   store.set('playlists', playlists); store.set('plDeleted', plDeleted); store.set('clips', clipCache); store.set('history', playLog);
 }
+// ---------- Pont avec le Mac, la S8 et la TV (profil Boss) ----------
+// Le Mac, la S8 et la TV partagent « BossPlay-sauvegarde.json » à la racine du dossier de musique Google Drive
+// (chemins relatifs Artiste/Album/fichier). La PWA y ajoute ses playlists et favoris, et récupère les leurs.
+// Comme partout : on ajoute ce qui manque, on n'efface rien.
+const BACKUP_FILE = 'BossPlay-sauvegarde.json';
+// Le Mac exige des identifiants de playlist au format UUID : celui d'une playlist de la PWA en est dérivé (toujours le même).
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function uuidFor(id) {
+  id = String(id || '');
+  if (UUID_RE.test(id)) return id.toUpperCase();
+  let hex = '';
+  for (let k = 0; k < 4; k++) {
+    let x = 0x811c9dc5 ^ (k * 0x9e3779b9);
+    for (let i = 0; i < id.length; i++) { x ^= id.charCodeAt(i); x = Math.imul(x, 0x01000193) >>> 0; }
+    hex += (x >>> 0).toString(16).padStart(8, '0');
+  }
+  return (hex.slice(0, 8) + '-' + hex.slice(8, 12) + '-4' + hex.slice(13, 16) + '-a' + hex.slice(17, 20) + '-' + hex.slice(20, 32)).toUpperCase();
+}
+const bridgeState = { last: store.get('bridgeLast', 0), msg: store.get('bridgeMsg', ''), busy: false };
+async function bridge(manual) {
+  if (bridgeState.busy || !hasToken() || !S.rootId || !lib.tracks.length) return;
+  if (sync.name !== 'Boss' || !sync.admin) return;
+  bridgeState.busy = true;
+  try {
+    const j = await drive('files', { q: `'${S.rootId}' in parents and name='${BACKUP_FILE}' and trashed=false`, fields: 'files(id,modifiedTime)', orderBy: 'modifiedTime desc', pageSize: 5, supportsAllDrives: true, includeItemsFromAllDrives: true });
+    const fid = j.files?.[0]?.id || null;
+    let f = null;
+    if (fid) { const r = await gfetch('https://www.googleapis.com/drive/v3/files/' + fid + '?alt=media'); if (r.ok) f = await r.json(); }
+    f = f && typeof f === 'object' ? f : { version: 1, favorites: [], favAlbums: [], favArtists: [], playlists: [], smart: [], ratings: {}, radios: [], nowBest: {}, plays: {} };
+    f.playlists = f.playlists || []; f.favorites = f.favorites || [];
+    // 1) Ce que le Mac, la S8 et la TV ont, et pas la PWA
+    let gotPl = 0, gotFav = 0;
+    const mine = new Set(playlists.map(p => uuidFor(p.id)));
+    const fileTs = Date.parse(f.date || '') || 1;
+    for (const p of f.playlists) {
+      if (!p || !p.id || mine.has(uuidFor(p.id)) || plDeleted[p.id]) continue;
+      const ts = (p.urls || []).map(byPath).filter(Boolean);
+      playlists.push({ id: p.id, name: String(p.name || 'Playlist').slice(0, 80), ids: ts.map(t => t.id), paths: p.urls || [], ts: fileTs });
+      gotPl++;
+    }
+    for (const rp of f.favorites) {
+      const t = byPath(rp); if (!t) continue;
+      const k = 't:' + t.id;
+      if (favTs[k] === undefined || favTs[k] === 1) { if (!favs.tracks.has(t.id)) { favTs[k] = fileTs; favs.tracks.add(t.id); gotFav++; } }
+    }
+    if (gotPl || gotFav) { store.set('playlists', playlists); store.set('favTracks', [...favs.tracks]); store.set('favTs', favTs); markDirty(); }
+    // 2) Ce que la PWA a, et pas le fichier
+    const inFile = new Set(f.playlists.map(p => p && uuidFor(p.id)));
+    let putPl = 0, putFav = 0;
+    for (const p of playlists) {
+      if (inFile.has(uuidFor(p.id))) continue;
+      const urls = resolveList(p.ids, p.paths).map(pathOf);
+      if (!urls.length) continue;
+      f.playlists.push({ id: uuidFor(p.id), name: p.name, urls }); putPl++;
+    }
+    const favSet = new Set(f.favorites.map(x => String(x).split('/').slice(-3).map(fold).join('/')));
+    for (const id of favs.tracks) {
+      const t = lib.byId.get(id); if (!t) continue;
+      const rp = pathOf(t), k = rp.split('/').slice(-3).map(fold).join('/');
+      if (!favSet.has(k)) { f.favorites.push(rp); favSet.add(k); putFav++; }
+    }
+    let wrote = true;
+    if (putPl || putFav || !fid) {
+      f.device = 'BossPlay PWA (' + devName() + ')'; f.date = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+      const body = JSON.stringify(f);
+      let r;
+      if (fid) r = await gfetch('https://www.googleapis.com/upload/drive/v3/files/' + fid + '?uploadType=media&supportsAllDrives=true', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body });
+      else r = await gfetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id', multipart({ name: BACKUP_FILE, parents: [S.rootId] }, body, 'application/json'));
+      wrote = r.ok;
+    }
+    const parts = [];
+    if (gotPl || gotFav) parts.push(`reçu ${gotPl} playlist${gotPl > 1 ? 's' : ''} et ${gotFav} favori${gotFav > 1 ? 's' : ''}`);
+    if (putPl || putFav) parts.push(wrote ? `envoyé ${putPl} playlist${putPl > 1 ? 's' : ''} et ${putFav} favori${putFav > 1 ? 's' : ''}` : `${putPl} playlist${putPl > 1 ? 's' : ''} en attente d'envoi`);
+    bridgeState.msg = !wrote && !hasWide() ? 'Pour envoyer tes playlists au Mac, à la S8 et à la TV, autorise l\'accès complet ci-dessous.'
+      : (parts.length ? parts.join(' · ') : 'À jour avec le Mac, la S8 et la TV');
+    bridgeState.last = Date.now(); store.set('bridgeLast', bridgeState.last); store.set('bridgeMsg', bridgeState.msg);
+    if (manual) toast(bridgeState.msg);
+    if (gotPl || gotFav) render();
+  } catch (e) { if (manual && e.message !== 'auth') toast('Échange impossible (' + e.message + ')'); }
+  bridgeState.busy = false;
+}
+
 // Sauvegarde du profil dans le dossier caché de BossPlay du compte Google : une par profil.
 // Le propriétaire du compte (Boss sur le compte de Boss, Sam sur le sien) garde l'ancien nom de fichier.
 function profileFileName(n = sync.name) {
@@ -1532,7 +1623,13 @@ function viewSettings(v) {
         h('button', { class: 'pill', onclick: () => hasToken() ? pickProfile() : connect() }, 'Changer')),
       h('p', { class: 'muted small' }, sync.me ? 'Compte Google : ' + sync.me.email : 'Connecte-toi avec ton propre compte Google : tes favoris, playlists et écoutes te suivent sur tous tes appareils, sans se mélanger avec ceux de la famille.'),
       h('p', { class: 'small', style: sync.error ? 'color:var(--red)' : '' }, sync.error || (ago == null ? '' : '✓ Synchronisé ' + (ago < 1 ? 'à l\'instant' : 'il y a ' + ago + ' min') + ' · ' + favs.tracks.size + ' titres favoris · ' + playlists.length + ' playlists · ' + playLog.length + ' écoutes')),
-      h('button', { class: 'pill', onclick: async () => { if (!hasToken() && !(await connect())) return; await pull(); toast(sync.error || 'Synchronisé'); render(); } }, 'Synchroniser maintenant')),
+      h('button', { class: 'pill', onclick: async () => { if (!hasToken() && !(await connect())) return; await pull(); await bridge(); toast(sync.error || 'Synchronisé'); render(); } }, 'Synchroniser maintenant')),
+    isBoss() ? h('div', { class: 'card' }, h('h2', { style: 'margin-top:0' }, 'Mac, S8 et TV'),
+      h('p', { class: 'muted small' }, 'Tes playlists et favoris de Boss sont échangés avec BossPlay sur le Mac, la tablette S8 et la Fire TV (fichier BossPlay-sauvegarde.json du dossier de musique). Rien n\'est jamais effacé : chacun ajoute ce qui lui manque.'),
+      h('p', { class: 'small' }, bridgeState.msg ? bridgeState.msg + (bridgeState.last ? ' · ' + new Date(bridgeState.last).toLocaleString('fr-CA', { dateStyle: 'short', timeStyle: 'short' }) : '') : 'Pas encore échangé.'),
+      h('div', { class: 'btns' },
+        h('button', { class: 'btn', onclick: async () => { if (!hasToken() && !(await connect())) return; await bridge(true); render(); } }, 'Échanger maintenant'),
+        hasWide() ? null : h('button', { class: 'btn alt', onclick: async () => { const t = await connectWide(); if (t) { await bridge(true); render(); } } }, 'Autoriser l\'accès complet (Boss)'))) : null,
     isBoss() ? h('div', { class: 'card' }, h('h2', { style: 'margin-top:0' }, 'Administration (Boss)'),
       h('p', { class: 'muted small' }, 'Pour la famille : dans Google Drive, partage le dossier de musique avec les comptes de Sam, Adam et Sofia en tant que « Lecteur ». Google les empêche alors de modifier ou supprimer quoi que ce soit.'),
       h('div', { class: 'btns' },
