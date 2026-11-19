@@ -2,7 +2,7 @@
    Paroles : LRCLIB. Clips : YouTube (lecteur officiel intégré, ou l'appli YouTube / YouTube Music). */
 'use strict';
 
-const VERSION = '1.10.0';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
+const VERSION = '1.10.1';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
 const YT_KEY = 'AIzaSyDoAxJzDHTkIPDqZbVcLr2Aguu40kPZqio';            // clé « BossPlayPWA » (limitée à bosseagle-la.github.io)
 // Lecture de la musique + dossier caché de BossPlay (profil de chacun) + fichiers créés par BossPlay (index de la bibliothèque).
 const SCOPE = 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file';
@@ -1000,9 +1000,17 @@ function albumCell(a) {
   return h('div', { class: 'cell' + (playing ? ' playing' : ''), 'data-album': a.id, onclick: () => openPage({ album: a.id }) },
     artBox('art', a, a.name), h('div', { class: 'n' }, a.name), h('div', { class: 'a' }, a.artist));
 }
+// Albums au hasard par défaut : nouvel ordre à chaque ouverture de l'appli, stable pendant l'utilisation.
+const SHUFFLE_SALT = Math.random().toString(36).slice(2);
+function shuffleKey(id) { let x = 2166136261; const t = id + SHUFFLE_SALT; for (let i = 0; i < t.length; i++) { x ^= t.charCodeAt(i); x = Math.imul(x, 16777619); } return x >>> 0; }
 function viewAlbums(v) {
-  const list = filt(lib.albums, a => a.name + ' ' + a.artist);
-  v.append(h('h1', null, 'Albums'), h('div', { class: 'grid' }, list.map(albumCell)));
+  const random = store.get('albumsAZ', false) !== true;
+  let list = filt(lib.albums, a => a.name + ' ' + a.artist);
+  if (random) list = list.map(a => [a, shuffleKey(a.id)]).sort((x, y) => x[1] - y[1]).map(x => x[0]);
+  v.append(h('div', { class: 'row', style: 'display:flex;align-items:center;gap:12px;flex-wrap:wrap' },
+      h('h1', { style: 'margin-right:auto' }, 'Albums'),
+      h('button', { class: 'btn alt', onclick: () => { store.set('albumsAZ', random); render(); } }, random ? '🔀 Au hasard' : 'A → Z')),
+    h('div', { class: 'grid' }, list.map(albumCell)));
 }
 function viewArtists(v) {
   const list = filt(lib.artists, a => a.name);
