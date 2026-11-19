@@ -2,7 +2,7 @@
    Paroles : LRCLIB. Clips : YouTube (lecteur officiel intégré, ou l'appli YouTube / YouTube Music). */
 'use strict';
 
-const VERSION = '1.10.1';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
+const VERSION = '1.10.2';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
 const YT_KEY = 'AIzaSyDoAxJzDHTkIPDqZbVcLr2Aguu40kPZqio';            // clé « BossPlayPWA » (limitée à bosseagle-la.github.io)
 // Lecture de la musique + dossier caché de BossPlay (profil de chacun) + fichiers créés par BossPlay (index de la bibliothèque).
 const SCOPE = 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file';
@@ -232,6 +232,18 @@ async function whoAmI() {
     sync.me = { email: j.user.emailAddress, name: j.user.displayName };
     store.set('me', sync.me);
     if (changed) { sync.fileId = null; store.set('syncFileId', null); }
+    // Appli réinstallée (ou profil d'enfant choisi avant le dossier) : on retrouve seul le dossier « BossPlay » du Drive,
+    // sinon un profil d'enfant, qui n'a pas accès aux Réglages, resterait bloqué sans musique.
+    let found = false;
+    if (!S.rootId) {
+      try {
+        const q = "name='BossPlay' and mimeType='application/vnd.google-apps.folder' and trashed=false";
+        const r = await drive('files', { q, fields: 'files(id,name,ownedByMe)', pageSize: 10, supportsAllDrives: true, includeItemsFromAllDrives: true });
+        const fs = r.files || [];
+        const d = fs.find(x => x.ownedByMe) || fs[0];
+        if (d) { S.rootId = d.id; S.rootName = d.name; saveS(); found = true; toast('Dossier « BossPlay » retrouvé'); }
+      } catch { }
+    }
     if (S.rootId) {
       const f = await drive('files/' + S.rootId, { fields: 'capabilities(canEdit),ownedByMe', supportsAllDrives: true });
       sync.admin = !!(f.ownedByMe || f.capabilities?.canEdit);
@@ -245,6 +257,7 @@ async function whoAmI() {
     if (isBoss()) loadFamilyWishes();
     pinShare(); rcKick();
     render();
+    if (found) { toast('Lecture de la musique…'); await scan(); store.set('lastScan', Date.now()); render(); }
   } catch (e) { if (e.message !== 'auth') { sync.error = e.message; } }
 }
 // Profil Boss protégé par un code (4 à 6 chiffres), propre à cet appareil, gardé chiffré (empreinte SHA-256).
@@ -386,7 +399,8 @@ function pickProfile(all) {
   const choose = n => {
     if (n === sync.name && !(n === 'Boss' && !bossOk)) { $('#sheet').hidden = true; return; }
     $('#sheet').hidden = true;
-    if (n === 'Boss' && !sync.admin) { toast('« Boss » est réservé au compte qui gère la musique.'); return; }
+    // Sans dossier choisi, on ne sait pas encore si ce compte gère la musique : le code de Boss suffit.
+    if (n === 'Boss' && !sync.admin && S.rootId) { toast('« Boss » est réservé au compte qui gère la musique.'); return; }
     if (n === 'Boss') return enterBoss('Boss');
     if (kid) return enterBoss(n);                               // quitter un profil d'enfant (vers n'importe qui) : code de Boss
     bossOk = false; localStorage.removeItem('bossOk');
@@ -992,7 +1006,8 @@ function viewEmpty(v) {
     h('p', { class: 'muted small', id: 'scanmsg' }, scanMsg),
     h('div', { class: 'btns' },
       S.rootId ? h('button', { class: 'btn', onclick: async () => { if (!hasToken() && !(await connect())) return; scan(); } }, 'Lire ma musique') : null,
-      isKid() ? null : h('button', { class: 'btn alt', onclick: () => go('settings') }, 'Réglages'),
+      isKid() ? (S.rootId ? null : h('button', { class: 'btn alt', onclick: () => enterBoss('Boss') }, '🔒 Choisir le dossier (code de Boss)'))
+        : h('button', { class: 'btn alt', onclick: () => go('settings') }, 'Réglages'),
       h('button', { class: 'btn alt', onclick: () => $('#files').click() }, 'Fichiers de l\'iPhone…'))));
 }
 function albumCell(a) {
