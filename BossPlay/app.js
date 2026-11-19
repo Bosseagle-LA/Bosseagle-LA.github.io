@@ -2,7 +2,7 @@
    Paroles : LRCLIB. Clips : YouTube (lecteur officiel intégré, ou l'appli YouTube / YouTube Music). */
 'use strict';
 
-const VERSION = '1.9.0';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
+const VERSION = '1.9.1';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
 const YT_KEY = 'AIzaSyDoAxJzDHTkIPDqZbVcLr2Aguu40kPZqio';            // clé « BossPlayPWA » (limitée à bosseagle-la.github.io)
 // Lecture de la musique + dossier caché de BossPlay (profil de chacun) + fichiers créés par BossPlay (index de la bibliothèque).
 const SCOPE = 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file';
@@ -488,12 +488,18 @@ async function bridge(manual) {
     if (fid) { const r = await gfetch('https://www.googleapis.com/drive/v3/files/' + fid + '?alt=media'); if (r.ok) f = await r.json(); }
     f = f && typeof f === 'object' ? f : { version: 1, favorites: [], favAlbums: [], favArtists: [], playlists: [], smart: [], ratings: {}, radios: [], nowBest: {}, plays: {} };
     f.playlists = f.playlists || []; f.favorites = f.favorites || [];
+    // 0) Playlists supprimées ailleurs : supprimées ici aussi ; les nôtres partent dans le fichier.
+    const gone = {};
+    for (const [k, v] of Object.entries(f.deletedPlaylists || {})) gone[uuidFor(k)] = Number(v) || 1;
+    for (const [id, ms] of Object.entries(plDeleted)) { const k = uuidFor(id), sec = Math.floor((ms || 0) / 1000) || 1; if (sec > (gone[k] || 0)) gone[k] = sec; }
+    let rmPl = 0;
+    playlists = playlists.filter(p => { if (gone[uuidFor(p.id)]) { plDeleted[p.id] = Date.now(); rmPl++; return false; } return true; });
     // 1) Ce que le Mac, la S8 et la TV ont, et pas la PWA
     let gotPl = 0, gotFav = 0;
     const mine = new Set(playlists.map(p => uuidFor(p.id)));
     const fileTs = Date.parse(f.date || '') || 1;
     for (const p of f.playlists) {
-      if (!p || !p.id || mine.has(uuidFor(p.id)) || plDeleted[p.id]) continue;
+      if (!p || !p.id || mine.has(uuidFor(p.id)) || plDeleted[p.id] || gone[uuidFor(p.id)]) continue;
       const ts = (p.urls || []).map(byPath).filter(Boolean);
       playlists.push({ id: p.id, name: String(p.name || 'Playlist').slice(0, 80), ids: ts.map(t => t.id), paths: p.urls || [], ts: fileTs });
       gotPl++;
@@ -503,7 +509,12 @@ async function bridge(manual) {
       const k = 't:' + t.id;
       if (favTs[k] === undefined || favTs[k] === 1) { if (!favs.tracks.has(t.id)) { favTs[k] = fileTs; favs.tracks.add(t.id); gotFav++; } }
     }
-    if (gotPl || gotFav) { store.set('playlists', playlists); store.set('favTracks', [...favs.tracks]); store.set('favTs', favTs); markDirty(); }
+    if (gotPl || gotFav || rmPl) { store.set('playlists', playlists); store.set('plDeleted', plDeleted); store.set('favTracks', [...favs.tracks]); store.set('favTs', favTs); markDirty(); }
+    // Le fichier ne garde pas les playlists supprimées, et retient toutes les suppressions.
+    const nPl = f.playlists.length;
+    f.playlists = f.playlists.filter(p => p && !gone[uuidFor(p.id)]);
+    const tombChanged = JSON.stringify(f.deletedPlaylists || {}) !== JSON.stringify(gone);
+    f.deletedPlaylists = gone;
     // 2) Ce que la PWA a, et pas le fichier
     const inFile = new Set(f.playlists.map(p => p && uuidFor(p.id)));
     let putPl = 0, putFav = 0;
@@ -520,7 +531,7 @@ async function bridge(manual) {
       if (!favSet.has(k)) { f.favorites.push(rp); favSet.add(k); putFav++; }
     }
     let wrote = true;
-    if (putPl || putFav || !fid) {
+    if (putPl || putFav || !fid || tombChanged || f.playlists.length !== nPl) {
       f.device = 'BossPlay PWA (' + devName() + ')'; f.date = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
       const body = JSON.stringify(f);
       let r;
@@ -529,13 +540,14 @@ async function bridge(manual) {
       wrote = r.ok;
     }
     const parts = [];
+    if (rmPl) parts.push(`${rmPl} playlist${rmPl > 1 ? 's' : ''} supprimée${rmPl > 1 ? 's' : ''} comme ailleurs`);
     if (gotPl || gotFav) parts.push(`reçu ${gotPl} playlist${gotPl > 1 ? 's' : ''} et ${gotFav} favori${gotFav > 1 ? 's' : ''}`);
     if (putPl || putFav) parts.push(wrote ? `envoyé ${putPl} playlist${putPl > 1 ? 's' : ''} et ${putFav} favori${putFav > 1 ? 's' : ''}` : `${putPl} playlist${putPl > 1 ? 's' : ''} en attente d'envoi`);
     bridgeState.msg = !wrote && !hasWide() ? 'Pour envoyer tes playlists au Mac, à la S8 et à la TV, autorise l\'accès complet ci-dessous.'
       : (parts.length ? parts.join(' · ') : 'À jour avec le Mac, la S8 et la TV');
     bridgeState.last = Date.now(); store.set('bridgeLast', bridgeState.last); store.set('bridgeMsg', bridgeState.msg);
     if (manual) toast(bridgeState.msg);
-    if (gotPl || gotFav) render();
+    if (gotPl || gotFav || rmPl) render();
   } catch (e) { if (manual && e.message !== 'auth') toast('Échange impossible (' + e.message + ')'); }
   bridgeState.busy = false;
 }
