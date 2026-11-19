@@ -2,7 +2,7 @@
    Paroles : LRCLIB. Clips : YouTube (lecteur officiel intégré, ou l'appli YouTube / YouTube Music). */
 'use strict';
 
-const VERSION = '1.9.1';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
+const VERSION = '1.10.0';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
 const YT_KEY = 'AIzaSyDoAxJzDHTkIPDqZbVcLr2Aguu40kPZqio';            // clé « BossPlayPWA » (limitée à bosseagle-la.github.io)
 // Lecture de la musique + dossier caché de BossPlay (profil de chacun) + fichiers créés par BossPlay (index de la bibliothèque).
 const SCOPE = 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file';
@@ -488,6 +488,25 @@ async function bridge(manual) {
     if (fid) { const r = await gfetch('https://www.googleapis.com/drive/v3/files/' + fid + '?alt=media'); if (r.ok) f = await r.json(); }
     f = f && typeof f === 'object' ? f : { version: 1, favorites: [], favAlbums: [], favArtists: [], playlists: [], smart: [], ratings: {}, radios: [], nowBest: {}, plays: {} };
     f.playlists = f.playlists || []; f.favorites = f.favorites || [];
+    // 00) Titres supprimés de tous les clones (Mac, S8) : retirés d'ici (copies hors ligne, favoris, playlists).
+    let rmTr = 0;
+    const gs = goneSet();
+    const freshGone = Object.keys(f.deletedTracks || {}).map(goneKey).filter(k => !gs.has(k));
+    if (freshGone.length) {
+      freshGone.forEach(k => gs.add(k));
+      store.set('goneTracks', [...gs]);
+      const hit = lib.tracks.filter(t => gs.has(goneKey(pathOf(t))));
+      if (hit.length) {
+        try { await unkeepTracks(hit, false); } catch (e) { }
+        const ids = new Set(hit.map(t => t.id));
+        for (const id of ids) favs.tracks.delete(id);
+        for (const p of playlists) if (p.ids) p.ids = p.ids.filter(i => !ids.has(i));
+        store.set('favTracks', [...favs.tracks]); store.set('playlists', playlists);
+        const raw = await idb.get('library');
+        if (raw) buildLib(raw);
+        rmTr = hit.length;
+      }
+    }
     // 0) Playlists supprimées ailleurs : supprimées ici aussi ; les nôtres partent dans le fichier.
     const gone = {};
     for (const [k, v] of Object.entries(f.deletedPlaylists || {})) gone[uuidFor(k)] = Number(v) || 1;
@@ -540,6 +559,7 @@ async function bridge(manual) {
       wrote = r.ok;
     }
     const parts = [];
+    if (rmTr) parts.push(`${rmTr} titre${rmTr > 1 ? 's' : ''} supprimé${rmTr > 1 ? 's' : ''} de tous les clones retiré${rmTr > 1 ? 's' : ''}`);
     if (rmPl) parts.push(`${rmPl} playlist${rmPl > 1 ? 's' : ''} supprimée${rmPl > 1 ? 's' : ''} comme ailleurs`);
     if (gotPl || gotFav) parts.push(`reçu ${gotPl} playlist${gotPl > 1 ? 's' : ''} et ${gotFav} favori${gotFav > 1 ? 's' : ''}`);
     if (putPl || putFav) parts.push(wrote ? `envoyé ${putPl} playlist${putPl > 1 ? 's' : ''} et ${putFav} favori${putFav > 1 ? 's' : ''}` : `${putPl} playlist${putPl > 1 ? 's' : ''} en attente d'envoi`);
@@ -547,7 +567,7 @@ async function bridge(manual) {
       : (parts.length ? parts.join(' · ') : 'À jour avec le Mac, la S8 et la TV');
     bridgeState.last = Date.now(); store.set('bridgeLast', bridgeState.last); store.set('bridgeMsg', bridgeState.msg);
     if (manual) toast(bridgeState.msg);
-    if (gotPl || gotFav || rmPl) render();
+    if (gotPl || gotFav || rmPl || rmTr) render();
   } catch (e) { if (manual && e.message !== 'auth') toast('Échange impossible (' + e.message + ')'); }
   bridgeState.busy = false;
 }
@@ -656,9 +676,14 @@ function parseName(file) {
   else if ((m = base.match(/^(\d{1,3})(?!\d)\s*[-.)]?\s+/))) { no = +m[1]; base = base.slice(m[0].length); }
   return { title: base.replace(/_/g, '\'').trim() || file, disc, no };
 }
+// Titres « supprimés de tous les clones » (Mac, S8) : jamais affichés, même si un vieil index les contient.
+let goneTracks = null;
+const goneKey = p => String(p).split('/').map(fold).slice(-3).join('/');
+function goneSet() { if (!goneTracks) goneTracks = new Set(store.get('goneTracks', [])); return goneTracks; }
 function buildLib(raw) {
   const albums = new Map(), artists = new Map();
-  const tracks = raw.tracks.map(t => Object.assign({}, t));
+  const gone = goneSet();
+  const tracks = raw.tracks.filter(t => !gone.size || !gone.has(goneKey(pathOf(t)))).map(t => Object.assign({}, t));
   for (const t of tracks) {
     let a = albums.get(t.albumId);
     if (!a) { const aa = t.albumArtist || t.artist; a = { id: t.albumId, name: t.album, artist: aa, artistKey: fold(aa), tracks: [], cover: raw.covers[t.albumId] || null }; albums.set(a.id, a); }
