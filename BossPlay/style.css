@@ -250,3 +250,6 @@ h2.row{display:flex;align-items:center;gap:8px}
 #full .ib.clip.on{background:rgba(255,255,255,.12)}
 #full .ib.clip.on .clipico .tri{fill:#EF4444}
 #full .ib .clipico{width:22px;height:22px;vertical-align:0}
+/* Pictogrammes ronds : contenu exactement centré (le ⋯ était décalé par le style des boutons) */
+#full .ib{padding:0;margin:0;line-height:0;text-align:center}
+#full .ib > svg{display:block;margin:auto}
