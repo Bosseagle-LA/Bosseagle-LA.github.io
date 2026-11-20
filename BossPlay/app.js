@@ -2,7 +2,7 @@
    Paroles : LRCLIB. Clips : YouTube (lecteur officiel intégré, ou l'appli YouTube / YouTube Music). */
 'use strict';
 
-const VERSION = '2.0.4';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
+const VERSION = '2.0.5';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
 const YT_KEY = 'AIzaSyDoAxJzDHTkIPDqZbVcLr2Aguu40kPZqio';            // clé « BossPlayPWA » (limitée à bosseagle-la.github.io)
 // Lecture de la musique + dossier caché de BossPlay (profil de chacun) + fichiers créés par BossPlay (index de la bibliothèque).
 const SCOPE = 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file';
@@ -51,7 +51,7 @@ function toast(msg, ms = 2600) {
 // Données d'usage PRIVÉES, une copie par profil (Boss, Sam, Adam, Sofia) : favoris, playlists, écoutes, clips choisis,
 // radios favorites, envies, et l'état de leur sauvegarde. Le reste (bibliothèque, réglages de la source, musique
 // téléchargée sur l'appareil, code de Boss…) est commun à l'appareil.
-const PERSONAL = ['favTracks', 'favAlbums', 'favTs', 'playlists', 'plDeleted', 'history', 'clips', 'xRadios', 'xRadiosDel',
+const PERSONAL = ['favTracks', 'favAlbums', 'favArtists', 'favTs', 'playlists', 'plDeleted', 'history', 'clips', 'xRadios', 'xRadiosDel',
   'xWishes', 'xWishDel', 'xBought', 'xHidden', 'xWishSeen', 'xWishFile', 'xWishShared', 'syncFileId', 'syncLast', 'syncDirty'];
 const PSET = new Set(PERSONAL);
 const rawGet = (k, d) => { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } };
@@ -105,17 +105,19 @@ const S = Object.assign({
 }, store.get('settings', {}));
 if (!S.clientId) S.clientId = DEFAULT_CLIENT;
 const saveS = () => store.set('settings', S);
-const favs = { tracks: new Set(store.get('favTracks', [])), albums: new Set(store.get('favAlbums', [])) };
+const favs = { tracks: new Set(store.get('favTracks', [])), albums: new Set(store.get('favAlbums', [])), artists: new Set(store.get('favArtists', [])) };
+const favSet = kind => kind === 't' ? favs.tracks : kind === 'a' ? favs.albums : favs.artists;   // 't' titre, 'a' album, 'r' artiste
+const favFrom = (ts, kind) => new Set(Object.keys(ts).filter(k => k.startsWith(kind + ':') && ts[k] > 0).map(k => k.slice(2)));
 // Favoris datés (synchronisation) : 't:id' / 'a:id' → +date (favori) ou −date (retiré).
 let favTs = store.get('favTs', null);
 if (!favTs) { favTs = {}; favs.tracks.forEach(id => favTs['t:' + id] = 1); favs.albums.forEach(id => favTs['a:' + id] = 1); }
-const saveFavs = () => { store.set('favTracks', [...favs.tracks]); store.set('favAlbums', [...favs.albums]); store.set('favTs', favTs); markDirty(); };
+const saveFavs = () => { store.set('favTracks', [...favs.tracks]); store.set('favAlbums', [...favs.albums]); store.set('favArtists', [...favs.artists]); store.set('favTs', favTs); markDirty(); };
 function setFav(kind, id, on) {
   favTs[kind + ':' + id] = on ? Date.now() : -Date.now();
-  (kind === 't' ? favs.tracks : favs.albums)[on ? 'add' : 'delete'](id);
+  favSet(kind)[on ? 'add' : 'delete'](id);
   saveFavs();
 }
-function toggleFav(kind, id) { setFav(kind, id, !(kind === 't' ? favs.tracks : favs.albums).has(id)); }
+function toggleFav(kind, id) { setFav(kind, id, !favSet(kind).has(id)); }
 // Now Best : les super favoris du moment (flamme orange), comme sur le Mac, la S8 et la TV. id → date d'ajout.
 let nowBest = store.get('nowBest', {});
 const saveBest = () => { store.set('nowBest', nowBest); markDirty(); };
@@ -574,6 +576,7 @@ function reloadPersonal() {
   favTs = store.get('favTs', {});
   favs.tracks = new Set(Object.keys(favTs).filter(k => k.startsWith('t:') && favTs[k] > 0).map(k => k.slice(2)));
   favs.albums = new Set(Object.keys(favTs).filter(k => k.startsWith('a:') && favTs[k] > 0).map(k => k.slice(2)));
+  favs.artists = favFrom(favTs, 'r');
   playlists = store.get('playlists', []); plDeleted = store.get('plDeleted', {});
   playLog = store.get('history', []); clipCache = store.get('clips', {});
   X.radios = store.get('xRadios', []); X.radiosDel = store.get('xRadiosDel', {});
@@ -593,6 +596,7 @@ function mergeProfile(r) {
   for (const [k, v] of Object.entries(r.favTs || {})) if (Math.abs(v) > Math.abs(favTs[k] || 0)) favTs[k] = v;
   favs.tracks = new Set(Object.keys(favTs).filter(k => k.startsWith('t:') && favTs[k] > 0).map(k => k.slice(2)));
   favs.albums = new Set(Object.keys(favTs).filter(k => k.startsWith('a:') && favTs[k] > 0).map(k => k.slice(2)));
+  favs.artists = favFrom(favTs, 'r');
   for (const [k, v] of Object.entries(r.plDeleted || {})) if (v > (plDeleted[k] || 0)) plDeleted[k] = v;
   const byId = new Map(playlists.map(p => [p.id, p]));
   for (const p of r.playlists || []) { const mine = byId.get(p.id); if (!mine || (p.ts || 0) > (mine.ts || 0)) byId.set(p.id, p); }
@@ -603,7 +607,7 @@ function mergeProfile(r) {
   playLog.sort((a, b) => a.at - b.at); if (playLog.length > 5000) playLog = playLog.slice(-5000);
   if (r.prefs && (r.updated || 0) > sync.last && !sync.dirty) { Object.assign(S, r.prefs); saveS(); applyTheme(); }
   extraMerge(r.extra);
-  store.set('favTracks', [...favs.tracks]); store.set('favAlbums', [...favs.albums]); store.set('favTs', favTs);
+  store.set('favTracks', [...favs.tracks]); store.set('favAlbums', [...favs.albums]); store.set('favArtists', [...favs.artists]); store.set('favTs', favTs);
   store.set('playlists', playlists); store.set('plDeleted', plDeleted); store.set('clips', clipCache); store.set('history', playLog);
 }
 // ---------- Pont avec le Mac, la S8 et la TV (profil Boss) ----------
@@ -694,7 +698,13 @@ async function bridge(manual) {
       nowBest[t.id] = Date.parse(d) || Date.now(); gotBest++;
     }
     if (gotBest) store.set('nowBest', nowBest);
-    if (gotPl || gotFav || rmPl) { store.set('playlists', playlists); store.set('plDeleted', plDeleted); store.set('favTracks', [...favs.tracks]); store.set('favTs', favTs); markDirty(); }
+    // Artistes favoris du Mac (nom du dossier de l'artiste)
+    for (const name of f.favArtists || []) {
+      const key = fold(String(name)); if (!lib.artistByKey.has(key)) continue;
+      const k = 'r:' + key;
+      if (favTs[k] === undefined || favTs[k] === 1) { if (!favs.artists.has(key)) { favTs[k] = fileTs; favs.artists.add(key); gotFav++; } }
+    }
+    if (gotPl || gotFav || rmPl) { store.set('playlists', playlists); store.set('plDeleted', plDeleted); store.set('favTracks', [...favs.tracks]); store.set('favArtists', [...favs.artists]); store.set('favTs', favTs); markDirty(); }
     // Le fichier ne garde pas les playlists supprimées, et retient toutes les suppressions.
     const nPl = f.playlists.length;
     f.playlists = f.playlists.filter(p => p && !gone[uuidFor(p.id)]);
@@ -722,6 +732,12 @@ async function bridge(manual) {
       const t = lib.byId.get(id); if (!t) continue;
       const rp = pathOf(t), k = rp.split('/').slice(-3).map(fold).join('/');
       if (!bestSet.has(k)) { f.nowBest[rp] = new Date(at).toISOString().replace(/\.\d{3}Z$/, 'Z'); bestSet.add(k); putBest++; }
+    }
+    f.favArtists = f.favArtists || [];
+    const arSet = new Set(f.favArtists.map(x => fold(String(x))));
+    for (const key of favs.artists) {
+      const ar = lib.artistByKey.get(key);
+      if (ar && !arSet.has(key)) { f.favArtists.push(ar.name); arSet.add(key); putFav++; }
     }
     let wrote = true;
     if (putPl || putFav || putBest || !fid || tombChanged || f.playlists.length !== nPl) {
@@ -1190,19 +1206,30 @@ function viewAlbums(v) {
 }
 function viewArtists(v) {
   const list = filt(lib.artists, a => a.name);
-  v.append(h('h1', null, 'Artistes'), h('div', { class: 'grid' }, list.map(ar => {
-    const a0 = ar.albums[0];
-    const fake = ar.photo ? { cover: ar.photo, tracks: a0.tracks } : a0;
-    return h('div', { class: 'cell', onclick: () => openPage({ artist: ar.key }) }, artBox('art', fake, ar.name),
-      h('div', { class: 'n' }, ar.name), h('div', { class: 'a' }, ar.albums.length + ' album' + (ar.albums.length > 1 ? 's' : '')));
-  })));
+  v.append(h('h1', null, 'Artistes'), h('div', { class: 'grid' }, list.map(artistCell)));
+}
+function artistCell(ar) {
+  const a0 = ar.albums[0];
+  const fake = ar.photo ? { cover: ar.photo, tracks: a0.tracks } : a0;
+  return h('div', { class: 'cell', onclick: () => openPage({ artist: ar.key }) }, artBox('art', fake, ar.name),
+    h('div', { class: 'n' }, (favs.artists.has(ar.key) ? '♥ ' : '') + ar.name), h('div', { class: 'a' }, ar.albums.length + ' album' + (ar.albums.length > 1 ? 's' : '')));
+}
+// Flamme touchée : on met à jour les flammes de cette chanson sur place (la liste ne saute pas en haut).
+function bestRefresh(id) {
+  const on = !!nowBest[id];
+  document.querySelectorAll(`[data-track="${CSS.escape(id)}"] .fl`).forEach(b => { b.classList.toggle('on', on); b.innerHTML = FLAME(on); b.title = on ? 'Retirer de Now Best' : 'Mettre en Now Best'; });
+  if (ui.tab === 'favs' && store.get('favTab', 'albums') === 'best') render();
+  updatePlayer();
 }
 function trackRow(t, list, i, opts = {}) {
   const playing = cur() && cur().id === t.id;
+  const no = opts.num ? (t.no || i + 1) : i + 1;
   return h('div', { class: 'tr' + (playing ? ' playing' : ''), 'data-track': t.id, onclick: () => play(list, i) },
-    h('div', { class: 'no' }, playing ? h('span', { class: 'eq' }, '▮▮') : (opts.num ? (t.no || i + 1) : i + 1)),
+    h('div', { class: 'no', 'data-no': no }, playing ? h('span', { class: 'eq' }, '▮▮') : no),
     h('div', { class: 'm' }, h('div', null, t.title), h('div', { class: 's' }, opts.album ? t.artist + ' — ' + t.album : t.artist)),
     favs.tracks.has(t.id) ? h('span', { style: 'color:var(--red)' }, '♥') : null,
+    h('button', { class: 'fl' + (nowBest[t.id] ? ' on' : ''), title: nowBest[t.id] ? 'Retirer de Now Best' : 'Mettre en Now Best', html: FLAME(!!nowBest[t.id]),
+      onclick: e => { e.stopPropagation(); toggleBest(t.id); bestRefresh(t.id); } }),
     offline.has(t.id) ? h('span', { class: 'kept', title: 'Sur cet appareil' }, '✓') : null,
     h('button', { class: 'x', onclick: e => { e.stopPropagation(); trackMenu(t, opts.playlist); } }, '⋯'));
 }
@@ -1234,20 +1261,34 @@ function viewArtist(v, ar) {
   const all = ar.albums.flatMap(a => a.tracks);
   v.append(h('h1', null, ar.name),
     h('div', { class: 'btns', style: 'margin-bottom:16px' }, h('button', { class: 'btn', onclick: () => play(all, 0) }, '▶ Tout lire'),
-      h('button', { class: 'btn alt', onclick: () => { P.shuffle = true; play(all, Math.floor(Math.random() * all.length)); } }, 'Aléatoire'), keepBtn(ar.name, all)),
+      h('button', { class: 'btn alt', onclick: () => { P.shuffle = true; play(all, Math.floor(Math.random() * all.length)); } }, 'Aléatoire'), keepBtn(ar.name, all),
+      h('button', { class: 'btn alt', onclick: () => { toggleFav('r', ar.key); toast(favs.artists.has(ar.key) ? ar.name + ' ajouté aux favoris' : ar.name + ' retiré des favoris'); render(); } },
+        favs.artists.has(ar.key) ? '♥ Favori' : '♡ Favori')),
     h('div', { class: 'grid' }, ar.albums.map(albumCell)));
 }
 function viewFavs(v) {
   const ts = [...favs.tracks].map(id => lib.byId.get(id)).filter(Boolean);
   const als = [...favs.albums].map(id => lib.albumById.get(id)).filter(Boolean);
-  v.append(h('h1', null, 'Favoris'));
+  const ars = [...favs.artists].map(k => lib.artistByKey.get(k)).filter(Boolean).sort((a, b) => a.name.localeCompare(b.name, 'fr'));
   const best = Object.entries(nowBest).sort((a, b) => b[1] - a[1]).map(([id]) => lib.byId.get(id)).filter(Boolean);
-  if (best.length) v.append(h('h2', { class: 'row', style: 'gap:8px' }, h('span', { class: 'flame', html: FLAME(true) }), 'Now Best'),
-    h('div', { class: 'list' }, best.map((t, i) => trackRow(t, best, i, { album: true }))));
+  // Quatre onglets comme sur le Mac : Albums / Chansons / Artistes / Now Best
+  const tabs = [['albums', 'Albums', als.length], ['songs', 'Chansons', ts.length], ['artists', 'Artistes', ars.length], ['best', 'Now Best', best.length]];
+  let tab = store.get('favTab', 'albums');
+  if (!tabs.some(x => x[0] === tab)) tab = 'albums';
   const favAll = ts.concat(als.flatMap(a => a.tracks).filter(t => !favs.tracks.has(t.id)));
-  if (favAll.length) v.append(h('div', { class: 'btns', style: 'margin-bottom:12px' }, keepBtn('Mes favoris', favAll)));
-  if (als.length) v.append(h('h2', null, 'Albums'), h('div', { class: 'grid' }, als.map(albumCell)));
-  v.append(h('h2', null, 'Titres'), ts.length ? h('div', { class: 'list' }, ts.map((t, i) => trackRow(t, ts, i, { album: true }))) : h('p', { class: 'muted' }, 'Touche ⋯ sur un titre › Favori.'));
+  v.append(h('h1', null, 'Favoris'),
+    h('div', { class: 'favtabs' }, tabs.map(([id, label, n]) => h('button', { class: 'ftab' + (id === tab ? ' on' : ''), onclick: () => { store.set('favTab', id); render(); } },
+      id === 'best' ? h('span', { class: 'flame', html: FLAME(true) }) : null, label, h('span', { class: 'n' }, String(n))))));
+  if (favAll.length && tab !== 'best') v.append(h('div', { class: 'btns', style: 'margin-bottom:12px' }, keepBtn('Mes favoris', favAll)));
+  const empty = txt => v.append(h('p', { class: 'muted' }, txt));
+  if (tab === 'albums') { if (als.length) v.append(h('div', { class: 'grid' }, als.map(albumCell))); else empty('Ouvre un album et touche ♡ pour l\'ajouter ici.'); }
+  else if (tab === 'songs') { if (ts.length) v.append(h('div', { class: 'list' }, ts.map((t, i) => trackRow(t, ts, i, { album: true })))); else empty('Touche ⋯ sur un titre › Favori.'); }
+  else if (tab === 'artists') { if (ars.length) v.append(h('div', { class: 'grid' }, ars.map(artistCell))); else empty('Ouvre un artiste et touche ♡ Favori.'); }
+  else {
+    if (best.length) v.append(h('div', { class: 'btns', style: 'margin-bottom:12px' }, h('button', { class: 'btn', onclick: () => play(best, 0) }, '▶ Tout lire'), keepBtn('Now Best', best)),
+      h('div', { class: 'list' }, best.map((t, i) => trackRow(t, best, i, { album: true }))));
+    else empty('Touche la flamme sur une chanson pour la mettre en Now Best.');
+  }
 }
 // ---------- Playlists partagées avec la famille ----------
 // Les playlists de chacun restent privées. « Partager avec la famille » en publie une copie sur le relais BossPlay :
@@ -1584,9 +1625,16 @@ function updatePlayer() {
 }
 function renderPlaying() {
   const t = cur();
-  document.querySelectorAll('.tr.playing,.cell.playing').forEach(e => e.classList.remove('playing'));
+  // Le petit indicateur vert suit la chanson : on remet le numéro sur l'ancienne ligne et l'indicateur sur la nouvelle.
+  document.querySelectorAll('.tr.playing,.cell.playing').forEach(e => {
+    e.classList.remove('playing');
+    const n = e.querySelector('.no'); if (n && n.dataset.no) n.textContent = n.dataset.no;
+  });
   if (!t) return;
-  document.querySelectorAll(`[data-track="${CSS.escape(t.id)}"]`).forEach(e => e.classList.add('playing'));
+  document.querySelectorAll(`[data-track="${CSS.escape(t.id)}"]`).forEach(e => {
+    e.classList.add('playing');
+    const n = e.querySelector('.no'); if (n) n.replaceChildren(h('span', { class: 'eq' }, '▮▮'));
+  });
   document.querySelectorAll(`[data-album="${CSS.escape(t.albumId)}"]`).forEach(e => e.classList.add('playing'));
 }
 function tick() {
@@ -1982,7 +2030,7 @@ $('#full .close').onclick = () => { $('#full').hidden = true; };
 $('#full .shuffle').onclick = () => { P.shuffle = !P.shuffle; if (P.shuffle) shuffleRest(); updatePlayer(); };
 $('#full .repeat').onclick = () => { P.repeat = (P.repeat + 1) % 3; updatePlayer(); };
 $('#full .fav').onclick = () => { const t = cur(); if (!t) return; toggleFav('t', t.id); updatePlayer(); };
-$('#full .best').onclick = () => { const t = cur(); if (!t) return; toggleBest(t.id); updatePlayer(); };
+$('#full .best').onclick = () => { const t = cur(); if (!t) return; toggleBest(t.id); bestRefresh(t.id); };
 $('#full .more').onclick = () => { const t = cur(); if (t) trackMenu(t); };
 $('#full .clip').onclick = openClip;
 $('#full .sleep').onclick = sleepSheet;
