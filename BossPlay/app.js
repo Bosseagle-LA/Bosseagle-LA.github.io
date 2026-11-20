@@ -2,7 +2,7 @@
    Paroles : LRCLIB. Clips : YouTube (lecteur officiel intégré, ou l'appli YouTube / YouTube Music). */
 'use strict';
 
-const VERSION = '1.10.2';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
+const VERSION = '2.0.0';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
 const YT_KEY = 'AIzaSyDoAxJzDHTkIPDqZbVcLr2Aguu40kPZqio';            // clé « BossPlayPWA » (limitée à bosseagle-la.github.io)
 // Lecture de la musique + dossier caché de BossPlay (profil de chacun) + fichiers créés par BossPlay (index de la bibliothèque).
 const SCOPE = 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file';
@@ -173,8 +173,100 @@ async function connectWide() {
   store.set('wide', true);
   return new Promise(res => { tokenWaiters.push(res); tokenClient.requestAccessToken({ scope: SCOPE + ' ' + WIDE, prompt: 'consent' }); });
 }
+// ---------- Reconnexion automatique (par le relais BossPlay) ----------
+// Dans un navigateur, Google ne donne qu'une autorisation d'une heure, sans moyen de la renouveler seul.
+// Une fois « Reconnexion automatique » activée, le relais garde l'autorisation durable de cet appareil et
+// en redonne une nouvelle à la demande : plus jamais de bouton « Se connecter ». En cas de perte de réseau,
+// BossPlay réessaie de plus en plus espacé, dès que le réseau revient, et à chaque ouverture de l'appli.
+let autoDs = localStorage.getItem('bp.autoDs') || '';
+let lastRenew = Number(localStorage.getItem('bp.lastRenew') || 0);
+const renew = { busy: null, tries: 0, timer: 0 };
+const hhmm = t => new Date(t).toLocaleTimeString('fr-CA', { hour: '2-digit', minute: '2-digit' });
+function renewNote() {
+  let n = $('#renewnote');
+  if (!n) { n = h('div', { id: 'renewnote' }); document.body.append(n); }
+  n.textContent = '✓ Google reconnecté · ' + hhmm(lastRenew);
+  n.classList.remove('out'); n.classList.add('in');
+  clearTimeout(renewNote._t);
+  renewNote._t = setTimeout(() => { n.classList.remove('in'); n.classList.add('out'); }, 5000);
+  const sl = $('#renewstamp'); if (sl) sl.textContent = 'Google · ' + hhmm(lastRenew);
+}
+/** Demande une nouvelle autorisation au relais. true = obtenue ; false = réessayer plus tard ; 'revoked' = à refaire à la main. */
+async function renewOnce(silent) {
+  if (!autoDs) return 'revoked';
+  if (renew.busy) return renew.busy;
+  renew.busy = (async () => {
+    try {
+      const ctl = new AbortController(); const tm = setTimeout(() => ctl.abort(), 10000);
+      const r = await fetch(RBASE + '/pwaauth/token', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ds: autoDs }), signal: ctl.signal });
+      clearTimeout(tm);
+      const j = await r.json().catch(() => ({}));
+      if (j.ok && j.access_token) {
+        const wasMissing = !hasToken();
+        tok = { t: j.access_token, exp: Date.now() + (Number(j.expires_in || 3600) - 120) * 1000, scope: j.scope || SCOPE };
+        store.set('token', tok);
+        lastRenew = Date.now(); localStorage.setItem('bp.lastRenew', String(lastRenew));
+        renew.tries = 0; clearTimeout(renew.timer);
+        banner();
+        if (!silent || wasMissing) renewNote();
+        planRenew();
+        return true;
+      }
+      if (j.revoked) { autoDs = ''; localStorage.removeItem('bp.autoDs'); banner(true); return 'revoked'; }
+      return false;
+    } catch { return false; }
+    finally { setTimeout(() => { renew.busy = null; }, 0); }
+  })();
+  return renew.busy;
+}
+/** Échec (réseau, Google muet) : nouvel essai de plus en plus espacé (5 s, 15 s, 30 s, 1 min, 2 min, puis toutes les 5 min). */
+function retryRenew() {
+  clearTimeout(renew.timer);
+  if (!autoDs) return;
+  const waits = [5, 15, 30, 60, 120, 300];
+  const w = waits[Math.min(renew.tries++, waits.length - 1)] * 1000;
+  renew.timer = setTimeout(async () => { if ((await renewOnce(false)) === false) retryRenew(); else { render(); if (!lib.tracks.length && S.rootId) scan(); } }, w);
+}
+/** Renouvelle 3 minutes avant l'expiration, pour que la musique ne s'arrête jamais. */
+function planRenew() {
+  clearTimeout(planRenew._t);
+  if (!autoDs || !tok) return;
+  planRenew._t = setTimeout(async () => { if ((await renewOnce(true)) === false) retryRenew(); }, Math.max(15000, tok.exp - Date.now() - 180000));
+}
+window.addEventListener('online', async () => { if (autoDs && !hasToken() && (await renewOnce(false)) === false) retryRenew(); });
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState === 'visible' && autoDs && !hasToken() && (await renewOnce(false)) === false) retryRenew();
+});
+/** Active la reconnexion automatique sur cet appareil (une seule fois) : une page Google s'ouvre, puis on revient ici. */
+async function enableAuto() {
+  try {
+    const r = await fetch(RBASE + '/tvauth/start', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: 'pwa', wide: isBoss() && store.get('wide', false), name: (sync.name || 'PWA') + ' · ' + (navigator.platform || '') }) });
+    const j = await r.json();
+    if (!j.ok) return toast(j.error || 'Relais indisponible');
+    window.open(RBASE + '/tvauth/go?c=' + encodeURIComponent(j.code), '_blank');
+    toast('Accepte l\'accès Google, puis reviens dans BossPlay');
+    for (let i = 0; i < 300; i++) {          // 10 minutes au plus
+      await new Promise(res => setTimeout(res, 2000));
+      const p = await fetch(RBASE + '/tvauth/poll?c=' + encodeURIComponent(j.code) + '&k=' + j.key).then(x => x.json()).catch(() => null);
+      if (!p) continue;
+      if (p.status === 'ok' && p.payload) {
+        const o = JSON.parse(p.payload);
+        autoDs = o.ds; localStorage.setItem('bp.autoDs', autoDs);
+        await renewOnce(false); render();
+        return toast('Reconnexion automatique activée (' + (o.email || '') + ')');
+      }
+      if (p.status === 'refused' || p.status === 'expired') return toast(p.error || 'Activation annulée');
+    }
+  } catch { toast('Relais injoignable : réessaie avec du réseau.'); }
+}
 async function token() {
   if (hasToken()) return tok.t;
+  if (autoDs) {
+    const ok = await renewOnce(false);
+    if (ok === true) return tok.t;
+    if (ok === false) { retryRenew(); throw new Error('reseau'); }   // pas de bouton : nouvel essai tout seul
+  }
   banner(true);
   throw new Error('auth');
 }
@@ -182,7 +274,7 @@ async function drive(path, params = {}, raw = false) {
   const u = new URL('https://www.googleapis.com/drive/v3/' + path);
   for (const [k, v] of Object.entries(params)) if (v != null) u.searchParams.set(k, v);
   const r = await fetch(u, { headers: { Authorization: 'Bearer ' + await token() } });
-  if (r.status === 401) { tok = null; store.set('token', null); banner(true); throw new Error('auth'); }
+  if (r.status === 401) { tok = null; store.set('token', null); if (!autoDs) banner(true); else if ((await renewOnce(false)) === false) retryRenew(); throw new Error('auth'); }
   if (!r.ok) throw new Error('drive ' + r.status);
   return raw ? r : r.json();
 }
@@ -199,6 +291,7 @@ function banner(need) {
   const b = $('#banner');
   const oldScope = hasToken() && !String(tok.scope || '').includes('drive.appdata');
   if (need === undefined) need = (!hasToken() && !!S.rootId) || oldScope;
+  if (autoDs && !oldScope) { b.hidden = true; return; }    // reconnexion automatique : jamais de bandeau
   if (!need || (hasToken() && !oldScope)) { b.hidden = true; return; }
   b.replaceChildren(h('span', null, oldScope ? 'Nouveauté : reconnecte-toi pour retrouver tes favoris sur tous tes appareils.' : S.clientId ? 'Connexion à Google Drive expirée.' : 'BossPlay n\'est pas encore relié à Google Drive.'),
     h('button', { onclick: async () => { const t = await connect(); if (t) { b.hidden = true; if (!lib.tracks.length && S.rootId) scan(); } } }, 'Se connecter'));
@@ -222,7 +315,7 @@ function addPlay(id) {
 }
 async function gfetch(url, opts = {}) {
   const r = await fetch(url, Object.assign({}, opts, { headers: Object.assign({ Authorization: 'Bearer ' + await token() }, opts.headers || {}) }));
-  if (r.status === 401) { tok = null; store.set('token', null); banner(true); throw new Error('auth'); }
+  if (r.status === 401) { tok = null; store.set('token', null); if (!autoDs) banner(true); else if ((await renewOnce(false)) === false) retryRenew(); throw new Error('auth'); }
   return r;
 }
 async function whoAmI() {
@@ -505,7 +598,11 @@ async function bridge(manual) {
     // 00) Titres supprimés de tous les clones (Mac, S8) : retirés d'ici (copies hors ligne, favoris, playlists).
     let rmTr = 0;
     const gs = goneSet();
-    const freshGone = Object.keys(f.deletedTracks || {}).map(goneKey).filter(k => !gs.has(k));
+    // Titres remis après une suppression (redéposés sur le Mac) : la suppression est levée, ils reviennent à la prochaine lecture.
+    const rev = f.revivedTracks || {}, del = f.deletedTracks || {};
+    const lifted = Object.keys(rev).filter(k => rev[k] > (del[k] || 0)).map(goneKey).filter(k => gs.has(k));
+    if (lifted.length) { lifted.forEach(k => gs.delete(k)); store.set('goneTracks', [...gs]); setTimeout(() => scan(), 2000); }
+    const freshGone = Object.keys(del).filter(k => !(rev[k] > del[k])).map(goneKey).filter(k => !gs.has(k));
     if (freshGone.length) {
       freshGone.forEach(k => gs.add(k));
       store.set('goneTracks', [...gs]);
@@ -527,6 +624,13 @@ async function bridge(manual) {
     for (const [id, ms] of Object.entries(plDeleted)) { const k = uuidFor(id), sec = Math.floor((ms || 0) / 1000) || 1; if (sec > (gone[k] || 0)) gone[k] = sec; }
     let rmPl = 0;
     playlists = playlists.filter(p => { if (gone[uuidFor(p.id)]) { plDeleted[p.id] = Date.now(); rmPl++; return false; } return true; });
+    // 0b) Playlists intelligentes : résultat calculé par le Mac, affiché tel quel (instantané, même contenu partout).
+    if (Array.isArray(f.smart)) {
+      const res = f.smartTracks || {};
+      smartLists = f.smart.map(sp => ({ id: String(sp.id), name: sp.name || 'Intelligente', paths: res[sp.id] || res[String(sp.id).toUpperCase()] || [] }))
+        .filter(x => x.paths.length);
+      store.set('smartLists', smartLists);
+    }
     // 1) Ce que le Mac, la S8 et la TV ont, et pas la PWA
     let gotPl = 0, gotFav = 0;
     const mine = new Set(playlists.map(p => uuidFor(p.id)));
@@ -994,6 +1098,7 @@ function render() {
     if (page.artist) return viewArtist(v, lib.artistByKey.get(page.artist));
     if (page.playlist) return viewPlaylist(v, playlists.find(p => p.id === page.playlist));
     if (page.shared) return viewShared(v, page.shared);
+    if (page.smart) return viewSmart(v, page.smart);
   }
   if (!lib.tracks.length && !localTracks.length && !['settings', 'radio', 'wishes', 'kept'].includes(ui.tab)) return viewEmpty(v);
   ({ albums: viewAlbums, artists: viewArtists, songs: viewSongs, favs: viewFavs, playlists: viewPlaylists, radio: viewRadio, wishes: viewWishes, stats: viewStats, settings: viewSettings, kept: viewKept })[ui.tab](v);
@@ -1110,9 +1215,23 @@ async function sharePlaylist(p, on) {
 }
 // Une playlist partagée modifiée : la copie publiée suit.
 function shareRefresh(p) { if (p && p.shared && hasToken()) sharePlaylist(p, true); }
+let smartLists = store.get('smartLists', []);
+function viewSmart(v, id) {
+  const l = smartLists.find(x => x.id === id);
+  if (!l) { v.append(h('p', null, 'Playlist intelligente introuvable.')); return; }
+  const ts = l.paths.map(byPath).filter(Boolean);
+  v.append(h('h1', null, l.name), h('p', { class: 'muted small' }, 'Intelligente (calculée sur le Mac) · ' + ts.length + ' titres'),
+    h('div', { class: 'btns', style: 'margin-bottom:12px' },
+      h('button', { class: 'btn', onclick: () => play(ts, 0) }, '▶ Lire'),
+      h('button', { class: 'btn alt', onclick: () => { P.shuffle = true; play(ts, Math.floor(Math.random() * ts.length)); } }, 'Aléatoire'),
+      keepBtn(l.name, ts)),
+    h('div', { class: 'list' }, ts.slice(0, 400).map((t, i) => trackRow(t, ts, i, { album: true }))));
+}
 function viewPlaylists(v) {
   v.append(h('h1', null, 'Playlists'),
     h('div', { class: 'btns', style: 'margin-bottom:12px' }, h('button', { class: 'btn', onclick: () => newPlaylist([]) }, '+ Nouvelle playlist')),
+    ...(isBoss() && smartLists.length ? [h('h2', null, 'Intelligentes'), h('div', { class: 'list' }, smartLists.map(l => h('div', { class: 'tr', onclick: () => openPage({ smart: l.id }) },
+      h('div', { class: 'no' }, '✦'), h('div', { class: 'm' }, h('div', null, l.name), h('div', { class: 's' }, l.paths.length + ' titres · intelligente')))))] : []),
     h('h2', null, 'Mes playlists'),
     playlists.length ? h('div', { class: 'list' }, playlists.map(p => h('div', { class: 'tr', onclick: () => openPage({ playlist: p.id }) },
       h('div', { class: 'no' }, '♫'), h('div', { class: 'm' }, h('div', null, p.name), h('div', { class: 's' }, p.ids.length + ' titres' + (p.shared ? ' · partagée avec la famille' : ''))))))
@@ -1204,6 +1323,30 @@ const isKept = t => t.local || offline.has(t.id);
 const fmtBytes = b => b >= 1e9 ? (b / 1e9).toFixed(1).replace('.', ',') + ' Go' : Math.max(1, Math.round(b / 1e6)) + ' Mo';
 async function freeSpace() { try { const e = await navigator.storage.estimate(); return e.quota ? e.quota - e.usage : null; } catch { return null; } }
 // Ajoute des titres à la liste à télécharger ; un seul téléchargement à la fois, deux titres en parallèle.
+// Profils d'enfants : en Wi-Fi, leurs favoris et leurs titres les plus écoutés sont gardés tout seuls sur l'appareil
+// (au plus 3 Go, une fois toutes les 12 heures), pour avoir de la musique dehors, sans données mobiles.
+// Ils peuvent toujours choisir eux-mêmes d'autres albums dans « Ma musique téléchargée ».
+async function autoKeepKids() {
+  if (!isKid() || !hasToken() || !navigator.onLine || dl.busy) return;
+  if (navigator.connection && navigator.connection.type === 'cellular') return;
+  if (Date.now() - store.get('autoKeepAt', 0) < 12 * 3600000) return;
+  store.set('autoKeepAt', Date.now());
+  const counts = new Map();
+  for (const p of playLog) counts.set(p.id, (counts.get(p.id) || 0) + 1);
+  const top = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 150).map(([id]) => lib.byId.get(id));
+  const favT = [...favs.tracks].map(id => lib.byId.get(id));
+  const favA = [...favs.albums].flatMap(id => (lib.albumById.get(id) || { tracks: [] }).tracks);
+  const seen = new Set(); let bytes = lib.tracks.filter(t => offline.has(t.id)).reduce((n, t) => n + (t.size || 0), 0);
+  const pick = [];
+  for (const t of favT.concat(favA, top)) {
+    if (!t || t.local || offline.has(t.id) || seen.has(t.id)) continue;
+    seen.add(t.id);
+    if (bytes + (t.size || 8e6) > 3e9) break;
+    bytes += t.size || 8e6; pick.push(t);
+    if (pick.length >= 300) break;
+  }
+  if (pick.length) keepTracks('Ma sélection automatique', pick);
+}
 async function keepTracks(name, tracks) {
   const todo = tracks.filter(t => !t.local && !offline.has(t.id) && !dl.queue.some(x => x.id === t.id));
   if (!todo.length) { toast('« ' + name + ' » est déjà sur cet appareil'); return; }
@@ -1677,7 +1820,8 @@ function viewSettings(v) {
   const pills = (key, opts, after) => h('div', { class: 'row' }, opts.map(([val, label]) =>
     h('button', { class: 'pill' + (S[key] === val ? ' on' : ''), onclick: () => { S[key] = val; saveS(); if (after) after(); render(); } }, label)));
   const ago = sync.last ? Math.max(0, Math.round((Date.now() - sync.last) / 60000)) : null;
-  v.append(h('h1', null, 'Réglages'),
+  v.append(h('h1', { class: 'row', style: 'justify-content:space-between' }, h('span', null, 'Réglages'),
+      h('span', { id: 'renewstamp', class: 'muted', style: 'font-size:12px;font-weight:500' }, lastRenew ? 'Google · ' + hhmm(lastRenew) : '')),
     h('div', { class: 'card' }, h('h2', { style: 'margin-top:0' }, 'Profil'),
       h('div', { class: 'row' }, h('b', { style: 'font-size:18px' }, sync.name || 'Aucun profil choisi'), isBoss() ? h('span', { class: 'pill on' }, 'Administrateur') : null,
         h('button', { class: 'pill', onclick: () => hasToken() ? pickProfile() : connect() }, 'Changer')),
@@ -1700,6 +1844,13 @@ function viewSettings(v) {
       isBoss() || !S.clientId ? h('div', { class: 'row', style: 'margin:6px 0 10px' }, id, h('button', { class: 'btn', onclick: () => { S.clientId = id.value.trim(); saveS(); tokenClient = null; toast('ID client enregistré'); render(); } }, 'Enregistrer')) : null,
       h('div', null, hasToken() ? '✓ Connecté à Google Drive' : 'Pas connecté', ' ',
         h('button', { class: 'pill', onclick: async () => { if (await connect()) render(); } }, hasToken() ? 'Reconnecter' : 'Se connecter')),
+      h('div', { class: 'row', style: 'margin-top:8px' }, autoDs ? h('span', { class: 'pill on' }, '✓ Reconnexion automatique')
+        : h('button', { class: 'pill', onclick: enableAuto }, 'Activer la reconnexion automatique'),
+        autoDs ? h('button', { class: 'pill', onclick: () => { if (!confirm('Désactiver la reconnexion automatique sur cet appareil ?')) return;
+          fetch(RBASE + '/pwaauth/forget', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ds: autoDs }) }).catch(() => { });
+          autoDs = ''; localStorage.removeItem('bp.autoDs'); render(); } }, 'Désactiver') : null),
+      h('p', { class: 'muted small' }, autoDs ? 'La connexion à Google se renouvelle toute seule, même après une perte de réseau.'
+        : 'Une seule fois par appareil : plus jamais de bouton « Se connecter » quand la connexion expire.'),
       h('p', null, 'Dossier de musique : ', h('b', null, S.rootName || 'aucun')),
       h('div', { class: 'btns' },
         h('button', { class: 'btn alt', onclick: () => browse('root', [['root', 'Mon Drive']]) }, 'Choisir le dossier…'),
@@ -1723,6 +1874,8 @@ function viewSettings(v) {
     extrasSettings(),
     h('div', { class: 'card' }, h('h2', { style: 'margin-top:0' }, 'Affichage'),
       pills('theme', [['auto', 'Automatique'], ['light', 'Jour'], ['dark', 'Nuit']], applyTheme),
+      h('div', { class: 'muted small', style: 'margin-top:10px' }, 'Logo de la sortie son (grand lecteur) :'),
+      pills('outLogo', OUT_LOGOS, () => updateBadges(curTrackSafe())),
       h('p', { class: 'muted small', id: 'usage' }, '')),
     h('p', { class: 'muted small' }, 'BossPlay PWA ' + VERSION + ' · Paroles : LRCLIB · Clips : YouTube'));
   navigator.storage?.estimate?.().then(e => { const u = $('#usage'); if (u) u.textContent = 'Stockage utilisé sur l\'appareil : ' + Math.round((e.usage || 0) / 1048576) + ' Mo'; });
@@ -2193,8 +2346,13 @@ function updateBadges(t) {
   if (multi) nodes.push(badgeImg('surround', 'Surround'));
   const dz = dolbyOf(t);
   if (dz) nodes.push(badgeImg(dz, (DOLBY.find(x => x[0] === dz) || [0, dz])[1]));
+  if (S.outLogo) nodes.push(badgeImg(S.outLogo, (OUT_LOGOS.find(x => x[0] === S.outLogo) || [0, ''])[1]));
   box.replaceChildren(...nodes);
 }
+// Logo de la sortie son : choisi à la main (le navigateur ne sait pas vers quel appareil part le son).
+const OUT_LOGOS = [['', 'Aucun'], ['out_fosi', 'Fosi Audio'], ['out_echo', 'Amazon Echo'], ['out_firetv', 'Fire TV'], ['out_sony', 'Sony'],
+  ['out_samsung', 'Samsung'], ['out_apple', 'Apple'], ['out_android', 'Android']];
+if (S.outLogo === undefined) S.outLogo = '';
 audio.addEventListener('loadedmetadata', () => updateBadges(cur()));
 
 // ---------- Karaoké (atténuation de la voix au centre) ----------
@@ -2502,7 +2660,14 @@ function extrasSettings() {
   if (!navigator.onLine && (offline.size || localTracks.length)) ui.tab = 'kept';   // sans Internet : directement la musique téléchargée
   render(); banner();
   if (S.clientId) initAuth();
+  // Reconnexion automatique : à l'ouverture, une connexion expirée est renouvelée tout de suite, sans rien demander.
+  if (autoDs && !hasToken()) {
+    const ok = await renewOnce(false);
+    if (ok === false) retryRenew();
+  } else if (autoDs) planRenew();
   if (hasToken()) whoAmI();
+  setTimeout(() => autoKeepKids(), 20000);   // après la lecture de la bibliothèque
+  window.addEventListener('online', () => setTimeout(() => autoKeepKids(), 5000));
   if (S.rootId && hasToken() && !raw) scan();
   else if (S.rootId && hasToken() && Date.now() - store.get('lastScan', 0) > 24 * 3600000) { store.set('lastScan', Date.now()); scan(); }   // au plus une fois par jour
 })();

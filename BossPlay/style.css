@@ -233,3 +233,9 @@ h2{font-size:17px;margin:20px 0 10px}
 @media (prefers-color-scheme:dark){[data-theme="auto"] .card .clipico rect{stroke:#fff}}
 h2.row{display:flex;align-items:center;gap:8px}
 .ic{display:inline-flex}.ic svg{width:22px;height:22px}
+/* Petite note « Google reconnecté » : glisse en haut, reste 5 s, puis se range (l'heure reste dans Réglages). */
+#renewnote{position:fixed;top:calc(env(safe-area-inset-top,0px) + 6px);left:50%;transform:translate(-50%,-140%);z-index:9999;
+  padding:4px 12px;border-radius:999px;font-size:12px;font-weight:600;color:#fff;background:rgba(22,163,74,.92);
+  box-shadow:0 4px 14px rgba(0,0,0,.25);transition:transform .35s ease,opacity .35s ease;opacity:0;pointer-events:none;white-space:nowrap}
+#renewnote.in{transform:translate(-50%,0);opacity:1}
+#renewnote.out{transform:translate(calc(50vw - 50% - 16px),-140%);opacity:0}
