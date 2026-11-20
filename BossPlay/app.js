@@ -2,7 +2,7 @@
    Paroles : LRCLIB. Clips : YouTube (lecteur officiel intégré, ou l'appli YouTube / YouTube Music). */
 'use strict';
 
-const VERSION = '2.0.3';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
+const VERSION = '2.0.4';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
 const YT_KEY = 'AIzaSyDoAxJzDHTkIPDqZbVcLr2Aguu40kPZqio';            // clé « BossPlayPWA » (limitée à bosseagle-la.github.io)
 // Lecture de la musique + dossier caché de BossPlay (profil de chacun) + fichiers créés par BossPlay (index de la bibliothèque).
 const SCOPE = 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file';
@@ -116,6 +116,15 @@ function setFav(kind, id, on) {
   saveFavs();
 }
 function toggleFav(kind, id) { setFav(kind, id, !(kind === 't' ? favs.tracks : favs.albums).has(id)); }
+// Now Best : les super favoris du moment (flamme orange), comme sur le Mac, la S8 et la TV. id → date d'ajout.
+let nowBest = store.get('nowBest', {});
+const saveBest = () => { store.set('nowBest', nowBest); markDirty(); };
+function toggleBest(id) {
+  if (nowBest[id]) delete nowBest[id]; else nowBest[id] = Date.now();
+  saveBest();
+  toast(nowBest[id] ? '🔥 Ajouté à Now Best' : 'Retiré de Now Best');
+}
+const FLAME = on => '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22c-4 0-7-2.8-7-6.6 0-3.4 2.4-5.4 3.7-7.6.4 1.7 1.3 2.8 2.4 3.4C11 7.6 12.6 4.3 15 2c-.3 3.3 1.3 5.4 2.6 7.3 1.2 1.7 2.4 3.4 2.4 6.1C20 19.2 16 22 12 22z" fill="' + (on ? '#FF7A1A' : 'none') + '" stroke="' + (on ? '#FF7A1A' : '#fff') + '" stroke-width="1.8" stroke-linejoin="round"/></svg>';
 let playlists = store.get('playlists', []);
 let plDeleted = store.get('plDeleted', {});
 const savePl = (p) => {
@@ -678,6 +687,13 @@ async function bridge(manual) {
       const k = 't:' + t.id;
       if (favTs[k] === undefined || favTs[k] === 1) { if (!favs.tracks.has(t.id)) { favTs[k] = fileTs; favs.tracks.add(t.id); gotFav++; } }
     }
+    // Now Best du Mac, de la S8 et de la TV (chemin → date)
+    let gotBest = 0;
+    for (const [rp, d] of Object.entries(f.nowBest || {})) {
+      const t = byPath(rp); if (!t || nowBest[t.id]) continue;
+      nowBest[t.id] = Date.parse(d) || Date.now(); gotBest++;
+    }
+    if (gotBest) store.set('nowBest', nowBest);
     if (gotPl || gotFav || rmPl) { store.set('playlists', playlists); store.set('plDeleted', plDeleted); store.set('favTracks', [...favs.tracks]); store.set('favTs', favTs); markDirty(); }
     // Le fichier ne garde pas les playlists supprimées, et retient toutes les suppressions.
     const nPl = f.playlists.length;
@@ -699,8 +715,16 @@ async function bridge(manual) {
       const rp = pathOf(t), k = rp.split('/').slice(-3).map(fold).join('/');
       if (!favSet.has(k)) { f.favorites.push(rp); favSet.add(k); putFav++; }
     }
+    f.nowBest = f.nowBest || {};
+    const bestSet = new Set(Object.keys(f.nowBest).map(x => String(x).split('/').slice(-3).map(fold).join('/')));
+    let putBest = 0;
+    for (const [id, at] of Object.entries(nowBest)) {
+      const t = lib.byId.get(id); if (!t) continue;
+      const rp = pathOf(t), k = rp.split('/').slice(-3).map(fold).join('/');
+      if (!bestSet.has(k)) { f.nowBest[rp] = new Date(at).toISOString().replace(/\.\d{3}Z$/, 'Z'); bestSet.add(k); putBest++; }
+    }
     let wrote = true;
-    if (putPl || putFav || !fid || tombChanged || f.playlists.length !== nPl) {
+    if (putPl || putFav || putBest || !fid || tombChanged || f.playlists.length !== nPl) {
       f.device = 'BossPlay PWA (' + devName() + ')'; f.date = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
       const body = JSON.stringify(f);
       let r;
@@ -717,7 +741,7 @@ async function bridge(manual) {
       : (parts.length ? parts.join(' · ') : 'À jour avec le Mac, la S8 et la TV');
     bridgeState.last = Date.now(); store.set('bridgeLast', bridgeState.last); store.set('bridgeMsg', bridgeState.msg);
     if (manual) toast(bridgeState.msg);
-    if (gotPl || gotFav || rmPl || rmTr) render();
+    if (gotPl || gotFav || gotBest || rmPl || rmTr) render();
   } catch (e) { if (manual && e.message !== 'auth') toast('Échange impossible (' + e.message + ')'); }
   bridgeState.busy = false;
 }
@@ -1217,6 +1241,9 @@ function viewFavs(v) {
   const ts = [...favs.tracks].map(id => lib.byId.get(id)).filter(Boolean);
   const als = [...favs.albums].map(id => lib.albumById.get(id)).filter(Boolean);
   v.append(h('h1', null, 'Favoris'));
+  const best = Object.entries(nowBest).sort((a, b) => b[1] - a[1]).map(([id]) => lib.byId.get(id)).filter(Boolean);
+  if (best.length) v.append(h('h2', { class: 'row', style: 'gap:8px' }, h('span', { class: 'flame', html: FLAME(true) }), 'Now Best'),
+    h('div', { class: 'list' }, best.map((t, i) => trackRow(t, best, i, { album: true }))));
   const favAll = ts.concat(als.flatMap(a => a.tracks).filter(t => !favs.tracks.has(t.id)));
   if (favAll.length) v.append(h('div', { class: 'btns', style: 'margin-bottom:12px' }, keepBtn('Mes favoris', favAll)));
   if (als.length) v.append(h('h2', null, 'Albums'), h('div', { class: 'grid' }, als.map(albumCell)));
@@ -1336,6 +1363,7 @@ function trackMenu(t, pl) {
     { label: '🎚 Pastille Dolby du titre…', fn: () => dolbyMenu('t:' + t.id, t.title) },
     { label: '🎚 Pastille Dolby de l\'album…', fn: () => dolbyMenu('a:' + t.albumId, t.album) },
     { label: fav ? 'Retirer des favoris' : 'Ajouter aux favoris', fn: () => { toggleFav('t', t.id); render(); updatePlayer(); } },
+    { label: nowBest[t.id] ? '🔥 Retirer de Now Best' : '🔥 Mettre en Now Best', fn: () => { toggleBest(t.id); render(); updatePlayer(); } },
     { label: 'Ajouter à une playlist…', fn: () => sheet('Ajouter à une playlist', [{ label: '+ Nouvelle playlist…', fn: () => newPlaylist([t.id]) },
       ...playlists.map(p => ({ label: p.name, fn: () => { if (!p.ids.includes(t.id)) p.ids.push(t.id); savePl(p); toast('Ajouté à « ' + p.name + ' »'); } }))]) },
     t.local ? null : offline.has(t.id) ? { label: 'Retirer de cet appareil', fn: () => unkeepTracks([t]) } : { label: 'Garder sur cet appareil', fn: () => keepTracks(t.title, [t]) },
@@ -1539,6 +1567,7 @@ function updatePlayer() {
   $('#full .shuffle').classList.toggle('on', P.shuffle);
   $('#full .repeat').classList.toggle('on', P.repeat > 0);
   { const r = $('#full .repeat'), st = String(P.repeat); if (r.dataset.st !== st) { r.dataset.st = st; r.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2l3 3-3 3M4 11V9a4 4 0 0 1 4-4h12M7 22l-3-3 3-3M20 13v2a4 4 0 0 1-4 4H4"/>' + (P.repeat === 2 ? '<text x="12" y="15.5" font-size="8" font-weight="800" text-anchor="middle" fill="currentColor" stroke="none">1</text>' : '') + '</svg>'; } }
+  { const b = $('#full .best'); if (b) { b.innerHTML = FLAME(!!nowBest[t.id]); } }
   { const on = favs.tracks.has(t.id), hp = $('#full .fav .heart');
     $('#full .fav').classList.toggle('faved', on);
     if (hp) { hp.setAttribute('fill', on ? '#ff3b5c' : 'none'); hp.setAttribute('stroke', on ? '#ff3b5c' : '#fff'); } }
@@ -1953,6 +1982,7 @@ $('#full .close').onclick = () => { $('#full').hidden = true; };
 $('#full .shuffle').onclick = () => { P.shuffle = !P.shuffle; if (P.shuffle) shuffleRest(); updatePlayer(); };
 $('#full .repeat').onclick = () => { P.repeat = (P.repeat + 1) % 3; updatePlayer(); };
 $('#full .fav').onclick = () => { const t = cur(); if (!t) return; toggleFav('t', t.id); updatePlayer(); };
+$('#full .best').onclick = () => { const t = cur(); if (!t) return; toggleBest(t.id); updatePlayer(); };
 $('#full .more').onclick = () => { const t = cur(); if (t) trackMenu(t); };
 $('#full .clip').onclick = openClip;
 $('#full .sleep').onclick = sleepSheet;

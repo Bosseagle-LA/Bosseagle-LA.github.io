@@ -253,3 +253,10 @@ h2.row{display:flex;align-items:center;gap:8px}
 /* Pictogrammes ronds : contenu exactement centré (le ⋯ était décalé par le style des boutons) */
 #full .ib{padding:0;margin:0;line-height:0;text-align:center}
 #full .ib > svg{display:block;margin:auto}
+.flame{display:inline-flex}.flame svg{width:22px;height:22px}
+#full.rmode .best{display:none}
+/* 7 pictogrammes sur une seule ligne, même sur iPhone */
+#full .actions{justify-content:space-between;gap:4px}
+#full .ib{width:40px;height:40px}
+#full .ib svg,#full .ib .clipico{width:21px;height:21px}
+@media (max-width:760px){#full .wrap{padding-left:18px;padding-right:18px}}
