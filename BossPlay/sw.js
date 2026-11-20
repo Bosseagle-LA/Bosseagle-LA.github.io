@@ -1,5 +1,5 @@
 // BossPlay PWA : garde l'appli elle-même pour s'ouvrir sans réseau. La musique (Google Drive) n'est pas touchée ici.
-const APP = 'bp-app-2.0.1';
+const APP = 'bp-app-2.0.2';
 const FILES = ['./', 'index.html', 'style.css', 'app.js', 'manifest.webmanifest', 'bp-icone-192.png', 'bp-icone-512.png', 'bp-icone-180.png', 'bp-icone-masque-192.png', 'bp-icone-masque-512.png', 'logo.png'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(APP).then(c => c.addAll(FILES)).then(() => self.skipWaiting())); });
 self.addEventListener('activate', e => {

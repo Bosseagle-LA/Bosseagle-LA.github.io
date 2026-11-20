@@ -2,7 +2,7 @@
    Paroles : LRCLIB. Clips : YouTube (lecteur officiel intégré, ou l'appli YouTube / YouTube Music). */
 'use strict';
 
-const VERSION = '2.0.1';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
+const VERSION = '2.0.2';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
 const YT_KEY = 'AIzaSyDoAxJzDHTkIPDqZbVcLr2Aguu40kPZqio';            // clé « BossPlayPWA » (limitée à bosseagle-la.github.io)
 // Lecture de la musique + dossier caché de BossPlay (profil de chacun) + fichiers créés par BossPlay (index de la bibliothèque).
 const SCOPE = 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file';
@@ -150,6 +150,8 @@ async function initAuth() {
       if (r && r.access_token) {
         tok = { t: r.access_token, exp: Date.now() + (Number(r.expires_in || 3600) - 120) * 1000, scope: r.scope || '' };
         store.set('token', tok);
+        lastRenew = Date.now(); localStorage.setItem('bp.lastRenew', String(lastRenew));   // heure affichée à droite de Réglages
+        { const sl = $('#renewstamp'); if (sl) sl.textContent = 'Google · ' + hhmm(lastRenew); }
         banner();
         whoAmI();
       }
@@ -237,6 +239,21 @@ window.addEventListener('online', async () => { if (autoDs && !hasToken() && (aw
 document.addEventListener('visibilitychange', async () => {
   if (document.visibilityState === 'visible' && autoDs && !hasToken() && (await renewOnce(false)) === false) retryRenew();
 });
+function autoErr(m) { localStorage.setItem('bp.autoErr', m ? hhmm(Date.now()) + ' · ' + m : ''); const e = $('#autodiag'); if (e && m) e.textContent = '⚠️ ' + m; if (m) toast(m, 6000); }
+/** Diagnostic (Réglages) : le relais connaît-il la reconnexion automatique ? */
+async function autoDiag() {
+  const e = $('#autodiag'); if (!e) return;
+  e.textContent = 'Vérification du relais…';
+  try {
+    const r = await fetch(RBASE + '/pwaauth/token', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ds: autoDs || '0'.repeat(64) }) });
+    const j = await r.json().catch(() => ({}));
+    if (r.status === 401 || r.status === 404 || !('revoked' in j || 'ok' in j)) { e.textContent = '⚠️ Le relais n\'est pas à jour : redéploie-le (dossier BossPlay-worker, npx wrangler deploy).'; return; }
+    if (j.error === 'relais non configuré') { e.textContent = '⚠️ Le relais n\'a pas les secrets TV_WEB_ID / TV_WEB_SECRET.'; return; }
+    if (!autoDs) { const last = localStorage.getItem('bp.autoErr'); e.textContent = '✓ Relais prêt.' + (last ? ' Dernier essai : ' + last : ' Touche « Activer la reconnexion automatique ».'); return; }
+    if (j.ok) { e.textContent = '✓ Reconnexion automatique opérationnelle (' + (j.email || '') + ').'; return; }
+    e.textContent = j.revoked ? '⚠️ Autorisation retirée chez Google : réactive la reconnexion automatique.' : '⚠️ Google ne répond pas pour l\'instant (nouvel essai automatique).';
+  } catch { e.textContent = '⚠️ Relais injoignable (réseau ?).'; }
+}
 /** Active la reconnexion automatique sur cet appareil (une seule fois) : une page Google s'ouvre, puis on revient ici. */
 async function enableAuto() {
   // iPhone : la page doit s'ouvrir PENDANT le toucher (sinon Safari la bloque sans rien dire) ; elle reçoit son adresse ensuite.
@@ -246,13 +263,13 @@ async function enableAuto() {
     const r = await fetch(RBASE + '/tvauth/start', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ kind: 'pwa', wide: isBoss() && store.get('wide', false), name: (sync.name || 'PWA') + ' · ' + (navigator.platform || '') }) });
     const j = await r.json();
-    if (!j.ok) { if (w) w.close(); return toast(j.error || 'Relais indisponible'); }
+    if (!j.ok || !j.code) { if (w) w.close(); return autoErr(j.error || 'Le relais a refusé la demande.'); }
     localStorage.setItem('bp.autoPending', JSON.stringify({ code: j.code, key: j.key, at: Date.now() }));
     const go = RBASE + '/tvauth/go?c=' + encodeURIComponent(j.code);
     if (w && !w.closed) w.location.href = go; else location.href = go;   // pas de nouvelle fenêtre : on y va directement
     toast('Accepte l\'accès Google, puis reviens dans BossPlay', 6000);
     await finishAuto(j.code, j.key, 300);
-  } catch { if (w) try { w.close(); } catch { } toast('Relais injoignable : réessaie avec du réseau.'); }
+  } catch { if (w) try { w.close(); } catch { } autoErr('Relais injoignable : réessaie avec du réseau.'); }
 }
 /** Attend que l'accès Google soit accepté (aussi au retour dans l'appli, si l'iPhone l'avait quittée pour la page Google). */
 async function finishAuto(code, key, rounds) {
@@ -260,14 +277,17 @@ async function finishAuto(code, key, rounds) {
     const p = await fetch(RBASE + '/tvauth/poll?c=' + encodeURIComponent(code) + '&k=' + key).then(x => x.json()).catch(() => null);
     if (p && p.status === 'ok' && p.payload) {
       localStorage.removeItem('bp.autoPending');
-      const o = JSON.parse(p.payload);
+      let o; try { o = JSON.parse(p.payload); } catch { o = null; }
+      if (!o || !o.ds) return autoErr('Le relais n\'est pas à jour (réponse de télé reçue) : redéploie-le puis recommence.');
       autoDs = o.ds; localStorage.setItem('bp.autoDs', autoDs);
-      await renewOnce(false); render();
+      const ok = await renewOnce(false); render();
+      if (ok !== true) return autoErr('Activée, mais Google n\'a pas encore répondu : nouvel essai automatique.');
+      autoErr('');
       return toast('Reconnexion automatique activée (' + (o.email || '') + ')');
     }
     if (p && (p.status === 'refused' || p.status === 'expired' || p.status === 'unknown' || p.ok === false && p.error)) {
       localStorage.removeItem('bp.autoPending');
-      return toast((p && p.error) || 'Activation annulée : recommence depuis Réglages.');
+      return autoErr((p && p.error) || 'Activation annulée ou expirée : recommence depuis Réglages.');
     }
     await new Promise(res => setTimeout(res, 2000));
   }
@@ -1519,7 +1539,9 @@ function updatePlayer() {
   $('#full .shuffle').classList.toggle('on', P.shuffle);
   $('#full .repeat').classList.toggle('on', P.repeat > 0);
   { const r = $('#full .repeat'), st = String(P.repeat); if (r.dataset.st !== st) { r.dataset.st = st; r.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2l3 3-3 3M4 11V9a4 4 0 0 1 4-4h12M7 22l-3-3 3-3M20 13v2a4 4 0 0 1-4 4H4"/>' + (P.repeat === 2 ? '<text x="12" y="15.5" font-size="8" font-weight="800" text-anchor="middle" fill="currentColor" stroke="none">1</text>' : '') + '</svg>'; } }
-  $('#full .fav').textContent = favs.tracks.has(t.id) ? '♥ Favori' : '♡ Favori';
+  { const on = favs.tracks.has(t.id), hp = $('#full .fav .heart');
+    $('#full .fav').classList.toggle('faved', on);
+    if (hp) { hp.setAttribute('fill', on ? '#ff3b5c' : 'none'); hp.setAttribute('stroke', on ? '#ff3b5c' : '#fff'); } }
   $('#full .clip').classList.toggle('on', !!clipCache[t.id]?.chosen);
   if (lastCoverFor !== t.albumId) {
     lastCoverFor = t.albumId;
@@ -1828,6 +1850,7 @@ $('#clip .src').onclick = () => {
 
 // ---------- Réglages ----------
 function viewSettings(v) {
+  setTimeout(autoDiag, 50);   // état de la reconnexion automatique, sous le bouton
   const id = h('input', { class: 'field', value: S.clientId, placeholder: '…apps.googleusercontent.com' });
   const pills = (key, opts, after) => h('div', { class: 'row' }, opts.map(([val, label]) =>
     h('button', { class: 'pill' + (S[key] === val ? ' on' : ''), onclick: () => { S[key] = val; saveS(); if (after) after(); render(); } }, label)));
@@ -1863,6 +1886,7 @@ function viewSettings(v) {
           autoDs = ''; localStorage.removeItem('bp.autoDs'); render(); } }, 'Désactiver') : null),
       h('p', { class: 'muted small' }, autoDs ? 'La connexion à Google se renouvelle toute seule, même après une perte de réseau.'
         : 'Une seule fois par appareil : plus jamais de bouton « Se connecter » quand la connexion expire.'),
+      h('p', { id: 'autodiag', class: 'small' }, ''),
       h('p', null, 'Dossier de musique : ', h('b', null, S.rootName || 'aucun')),
       h('div', { class: 'btns' },
         h('button', { class: 'btn alt', onclick: () => browse('root', [['root', 'Mon Drive']]) }, 'Choisir le dossier…'),
@@ -2318,7 +2342,9 @@ function sleepEnd() { if (!sleepT.endOfTrack) return false; clearSleep(); audio.
 function sleepBtn() {
   const b = $('#full .sleep'); if (!b) return;
   const left = sleepT.end ? Math.max(0, Math.ceil((sleepT.end - Date.now()) / 60000)) : 0;
-  b.textContent = sleepT.endOfTrack ? '⏾ fin' : sleepT.end ? '⏾ ' + left + ' min' : '⏾';
+  // Minuteur : pictogramme lune ; le temps restant s'affiche en petit dessous quand il tourne.
+  b.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="#fff" stroke-width="1.8" stroke-linejoin="round"><path d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11z"/></svg>'
+    + (sleepT.endOfTrack ? '<span class="mini">fin</span>' : sleepT.end ? '<span class="mini">' + left + ' min</span>' : '');
   b.classList.toggle('on', !!(sleepT.end || sleepT.endOfTrack));
 }
 

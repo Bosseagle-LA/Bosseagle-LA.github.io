@@ -240,3 +240,13 @@ h2.row{display:flex;align-items:center;gap:8px}
   box-shadow:0 4px 14px rgba(0,0,0,.25);transition:transform .35s ease,opacity .35s ease;opacity:0;pointer-events:none;white-space:nowrap}
 #renewnote.in{transform:translate(-50%,0);opacity:1}
 #renewnote.out{transform:translate(calc(50vw - 50% - 16px),-140%);opacity:0}
+/* Grand lecteur : une seule rangée sous la lecture, pictogrammes ronds */
+#full .actions{flex-wrap:nowrap;align-items:center;gap:8px}
+#full .ib{position:relative;flex:none;width:44px;height:44px;border-radius:50%;display:grid;place-items:center;background:rgba(255,255,255,.12);color:#fff}
+#full .ib svg{width:22px;height:22px}
+#full .ib.on{background:var(--accent)}
+#full .ib .mini{position:absolute;bottom:-14px;left:50%;transform:translateX(-50%);font-size:10px;font-weight:700;white-space:nowrap;color:var(--neon)}
+#full .actions .pill.lyr{flex:none}
+#full .ib.clip.on{background:rgba(255,255,255,.12)}
+#full .ib.clip.on .clipico .tri{fill:#EF4444}
+#full .ib .clipico{width:22px;height:22px;vertical-align:0}
