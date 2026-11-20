@@ -2,7 +2,7 @@
    Paroles : LRCLIB. Clips : YouTube (lecteur officiel intégré, ou l'appli YouTube / YouTube Music). */
 'use strict';
 
-const VERSION = '2.0.0';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
+const VERSION = '2.0.1';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
 const YT_KEY = 'AIzaSyDoAxJzDHTkIPDqZbVcLr2Aguu40kPZqio';            // clé « BossPlayPWA » (limitée à bosseagle-la.github.io)
 // Lecture de la musique + dossier caché de BossPlay (profil de chacun) + fichiers créés par BossPlay (index de la bibliothèque).
 const SCOPE = 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file';
@@ -239,26 +239,38 @@ document.addEventListener('visibilitychange', async () => {
 });
 /** Active la reconnexion automatique sur cet appareil (une seule fois) : une page Google s'ouvre, puis on revient ici. */
 async function enableAuto() {
+  // iPhone : la page doit s'ouvrir PENDANT le toucher (sinon Safari la bloque sans rien dire) ; elle reçoit son adresse ensuite.
+  const w = window.open('', '_blank');
   try {
+    if (w) { try { w.document.write('<p style="font:18px -apple-system;padding:30px">Connexion à Google…</p>'); } catch { } }
     const r = await fetch(RBASE + '/tvauth/start', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ kind: 'pwa', wide: isBoss() && store.get('wide', false), name: (sync.name || 'PWA') + ' · ' + (navigator.platform || '') }) });
     const j = await r.json();
-    if (!j.ok) return toast(j.error || 'Relais indisponible');
-    window.open(RBASE + '/tvauth/go?c=' + encodeURIComponent(j.code), '_blank');
-    toast('Accepte l\'accès Google, puis reviens dans BossPlay');
-    for (let i = 0; i < 300; i++) {          // 10 minutes au plus
-      await new Promise(res => setTimeout(res, 2000));
-      const p = await fetch(RBASE + '/tvauth/poll?c=' + encodeURIComponent(j.code) + '&k=' + j.key).then(x => x.json()).catch(() => null);
-      if (!p) continue;
-      if (p.status === 'ok' && p.payload) {
-        const o = JSON.parse(p.payload);
-        autoDs = o.ds; localStorage.setItem('bp.autoDs', autoDs);
-        await renewOnce(false); render();
-        return toast('Reconnexion automatique activée (' + (o.email || '') + ')');
-      }
-      if (p.status === 'refused' || p.status === 'expired') return toast(p.error || 'Activation annulée');
+    if (!j.ok) { if (w) w.close(); return toast(j.error || 'Relais indisponible'); }
+    localStorage.setItem('bp.autoPending', JSON.stringify({ code: j.code, key: j.key, at: Date.now() }));
+    const go = RBASE + '/tvauth/go?c=' + encodeURIComponent(j.code);
+    if (w && !w.closed) w.location.href = go; else location.href = go;   // pas de nouvelle fenêtre : on y va directement
+    toast('Accepte l\'accès Google, puis reviens dans BossPlay', 6000);
+    await finishAuto(j.code, j.key, 300);
+  } catch { if (w) try { w.close(); } catch { } toast('Relais injoignable : réessaie avec du réseau.'); }
+}
+/** Attend que l'accès Google soit accepté (aussi au retour dans l'appli, si l'iPhone l'avait quittée pour la page Google). */
+async function finishAuto(code, key, rounds) {
+  for (let i = 0; i < rounds; i++) {
+    const p = await fetch(RBASE + '/tvauth/poll?c=' + encodeURIComponent(code) + '&k=' + key).then(x => x.json()).catch(() => null);
+    if (p && p.status === 'ok' && p.payload) {
+      localStorage.removeItem('bp.autoPending');
+      const o = JSON.parse(p.payload);
+      autoDs = o.ds; localStorage.setItem('bp.autoDs', autoDs);
+      await renewOnce(false); render();
+      return toast('Reconnexion automatique activée (' + (o.email || '') + ')');
     }
-  } catch { toast('Relais injoignable : réessaie avec du réseau.'); }
+    if (p && (p.status === 'refused' || p.status === 'expired' || p.status === 'unknown' || p.ok === false && p.error)) {
+      localStorage.removeItem('bp.autoPending');
+      return toast((p && p.error) || 'Activation annulée : recommence depuis Réglages.');
+    }
+    await new Promise(res => setTimeout(res, 2000));
+  }
 }
 async function token() {
   if (hasToken()) return tok.t;
@@ -2660,6 +2672,16 @@ function extrasSettings() {
   if (!navigator.onLine && (offline.size || localTracks.length)) ui.tab = 'kept';   // sans Internet : directement la musique téléchargée
   render(); banner();
   if (S.clientId) initAuth();
+  // Activation commencée puis appli quittée pour la page Google : on la termine au retour (15 minutes au plus).
+  try {
+    const pend = JSON.parse(localStorage.getItem('bp.autoPending') || 'null');
+    if (pend && Date.now() - pend.at < 15 * 60000 && !autoDs) finishAuto(pend.code, pend.key, 60);
+    else localStorage.removeItem('bp.autoPending');
+  } catch { localStorage.removeItem('bp.autoPending'); }
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible' || autoDs) return;
+    try { const pend = JSON.parse(localStorage.getItem('bp.autoPending') || 'null'); if (pend && Date.now() - pend.at < 15 * 60000) finishAuto(pend.code, pend.key, 30); } catch { }
+  });
   // Reconnexion automatique : à l'ouverture, une connexion expirée est renouvelée tout de suite, sans rien demander.
   if (autoDs && !hasToken()) {
     const ok = await renewOnce(false);

@@ -109,9 +109,10 @@ h2{font-size:17px;margin:20px 0 10px}
 #full .pill.on{background:var(--accent)}
 #full .err{color:var(--red);margin-top:10px}
 @media (max-width:760px){
-  #full .wrap{flex-direction:column;gap:18px;padding-top:calc(56px + var(--safe-t))}
+  #full{overflow-y:auto;-webkit-overflow-scrolling:touch}
+  #full .wrap{flex-direction:column;gap:18px;padding-top:calc(56px + var(--safe-t));height:auto;min-height:100%;padding-bottom:calc(40px + var(--safe-b))}
   #full .left{flex:none;width:100%;height:auto;max-height:46vh}
-  #full .cover{width:min(100%,42vh)}
+  #full .cover{width:min(100%,40vh)}
   #full .lyrics{height:46vh;padding:30px 16px 60px}
   #full .right{width:100%}
   #full .title{font-size:22px}
