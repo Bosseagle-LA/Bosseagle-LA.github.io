@@ -2,7 +2,7 @@
    Paroles : LRCLIB. Clips : YouTube (lecteur officiel intégré, ou l'appli YouTube / YouTube Music). */
 'use strict';
 
-const VERSION = '2.0.6';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
+const VERSION = '2.0.7';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
 const YT_KEY = 'AIzaSyDoAxJzDHTkIPDqZbVcLr2Aguu40kPZqio';            // clé « BossPlayPWA » (limitée à bosseagle-la.github.io)
 // Lecture de la musique + dossier caché de BossPlay (profil de chacun) + fichiers créés par BossPlay (index de la bibliothèque).
 const SCOPE = 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file';
@@ -1045,8 +1045,11 @@ function artBox(cls, a, label) {
 }
 
 // ---------- Lecteur ----------
-const audio = new Audio();
+let audio = new Audio();
 audio.preload = 'auto';
+// Écouteurs permanents de l'élément audio, gardés en liste pour pouvoir les remettre sur un élément neuf (voir freshAudio).
+const audioEv = [];
+function onAudio(ev, fn) { audioEv.push([ev, fn]); audio.addEventListener(ev, fn); }
 const P = { queue: [], i: -1, shuffle: false, repeat: 0, urls: new Map(), seq: 0, error: '' };
 const cur = () => P.queue[P.i] || null;
 async function srcFor(t) {
@@ -1126,11 +1129,11 @@ function toggle() {
 }
 function playNext(list) { if (!cur()) return play(list); P.queue.splice(P.i + 1, 0, ...list); toast('Sera lu ensuite'); }
 function addQueue(list) { if (!cur()) return play(list); P.queue.push(...list); toast('Ajouté à la file d\'attente'); }
-audio.addEventListener('ended', () => { if (sleepEnd()) return; next(false); });
-audio.addEventListener('play', updatePlayer);
-audio.addEventListener('pause', updatePlayer);
-audio.addEventListener('timeupdate', tick);
-audio.addEventListener('error', () => { if (audio.src) { P.error = 'Lecture impossible de ce format sur cet appareil.'; updatePlayer(); } });
+onAudio('ended', () => { if (sleepEnd()) return; next(false); });
+onAudio('play', updatePlayer);
+onAudio('pause', updatePlayer);
+onAudio('timeupdate', tick);
+onAudio('error', () => { if (audio.src) { P.error = 'Lecture impossible de ce format sur cet appareil.'; updatePlayer(); } });
 
 function setSession(t) {
   if (!('mediaSession' in navigator)) return;
@@ -1149,6 +1152,8 @@ if ('mediaSession' in navigator) {
   set('previoustrack', () => { if (!radio.st) prev(); });
   set('nexttrack', () => { if (!radio.st) next(true); });
   set('seekto', d => { if (!radio.st && d.seekTime != null) audio.currentTime = d.seekTime; });
+  // Sur l'iPhone, sans ça l'écran verrouillé montre « ±10 s » au lieu de précédent / suivant.
+  set('seekbackward', null); set('seekforward', null);
 }
 
 // ---------- Interface ----------
@@ -2469,29 +2474,60 @@ function updateBadges(t) {
 const OUT_LOGOS = [['', 'Aucun'], ['out_fosi', 'Fosi Audio'], ['out_echo', 'Amazon Echo'], ['out_firetv', 'Fire TV'], ['out_sony', 'Sony'],
   ['out_samsung', 'Samsung'], ['out_apple', 'Apple'], ['out_android', 'Android']];
 if (S.outLogo === undefined) S.outLogo = '';
-audio.addEventListener('loadedmetadata', () => updateBadges(cur()));
+onAudio('loadedmetadata', () => updateBadges(cur()));
 
 // ---------- Karaoké (atténuation de la voix au centre) ----------
-const kara = { on: false, ctx: null, src: null, sum: null };
-function karaoke() {
-  try {
-    if (!kara.ctx) {
-      const C = window.AudioContext || window.webkitAudioContext; kara.ctx = new C();
-      kara.src = kara.ctx.createMediaElementSource(audio);
-      const split = kara.ctx.createChannelSplitter(2), inv = kara.ctx.createGain(); inv.gain.value = -1;
-      kara.sum = kara.ctx.createGain(); kara.sum.channelCount = 1; kara.sum.channelCountMode = 'explicit';
-      split.connect(kara.sum, 0); split.connect(inv, 1); inv.connect(kara.sum); kara.split = split;
-      kara.sum.connect(kara.ctx.destination);
-    }
-    kara.ctx.resume();
-    kara.on = !kara.on;
-    kara.src.disconnect();
-    kara.src.connect(kara.on ? kara.split : kara.ctx.destination);
-    $('#full .kara').classList.toggle('on', kara.on);
-    toast(kara.on ? '🎤 Karaoké : voix atténuée (selon l\'enregistrement)' : 'Karaoké désactivé');
-    if (kara.on && $('#full .lyrics').hidden) $('#full .lyr').click();
-  } catch (e) { toast('Karaoké indisponible sur cet appareil'); }
+// Sur l'iPhone, un son qui passe par l'audio Web (WebAudio) est coupé dès que l'écran se verrouille ou que l'appli passe
+// en arrière-plan : la chanson continue d'avancer, mais en silence. Et une fois branché sur l'audio Web, l'élément audio
+// ne peut plus en sortir. Donc : le karaoké ne branche l'audio Web que lorsqu'il est allumé, et l'éteindre (à la main ou
+// quand l'écran se verrouille) remplace l'élément audio par un neuf, au même endroit de la chanson.
+const kara = { on: false, ctx: null, src: null, sum: null, split: null, cut: false };
+function freshAudio() {
+  const old = audio, n = new Audio();
+  const wasPlaying = !old.paused, pos = old.currentTime || 0, src = old.getAttribute('src');
+  audioEv.forEach(([e, f]) => old.removeEventListener(e, f));
+  old.pause();
+  n.preload = 'auto'; n.volume = old.volume; n.muted = old.muted; n.playbackRate = old.playbackRate;
+  audioEv.forEach(([e, f]) => n.addEventListener(e, f));
+  audio = n;
+  if (src) {
+    n.src = src;
+    n.addEventListener('loadedmetadata', () => { try { n.currentTime = pos; } catch { } }, { once: true });
+    if (wasPlaying) n.play().catch(() => updatePlayer());
+  }
+  try { if (kara.ctx) kara.ctx.close(); } catch { }
+  kara.ctx = kara.src = kara.sum = kara.split = null;
+  old.removeAttribute('src'); try { old.load(); } catch { }
 }
+function karaOff(quiet) {
+  if (!kara.on && !kara.ctx) return;
+  kara.on = false; freshAudio();
+  $('#full .kara').classList.remove('on');
+  if (!quiet) toast('Karaoké désactivé');
+}
+function karaoke() {
+  if (kara.on) return karaOff();
+  try {
+    const C = window.AudioContext || window.webkitAudioContext; kara.ctx = new C();
+    kara.src = kara.ctx.createMediaElementSource(audio);
+    const split = kara.ctx.createChannelSplitter(2), inv = kara.ctx.createGain(); inv.gain.value = -1;
+    kara.sum = kara.ctx.createGain(); kara.sum.channelCount = 1; kara.sum.channelCountMode = 'explicit';
+    split.connect(kara.sum, 0); split.connect(inv, 1); inv.connect(kara.sum); kara.split = split;
+    kara.sum.connect(kara.ctx.destination);
+    kara.src.connect(split);
+    kara.ctx.resume();
+    kara.on = true;
+    $('#full .kara').classList.add('on');
+    toast('🎤 Karaoké : voix atténuée (selon l\'enregistrement). Il s\'éteint si l\'écran se verrouille.');
+    if ($('#full .lyrics').hidden) $('#full .lyr').click();
+  } catch (e) { karaOff(true); toast('Karaoké indisponible sur cet appareil'); }
+}
+// Écran verrouillé ou appli en arrière-plan : on éteint le karaoké pour que la musique continue avec le son.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden' && kara.on) { kara.cut = true; karaOff(true); }
+  else if (document.visibilityState === 'visible' && kara.cut) { kara.cut = false; toast('Karaoké éteint pendant que l\'écran était verrouillé — touche le micro pour le rallumer.'); }
+});
+window.addEventListener('pagehide', () => { if (kara.on) karaOff(true); });
 
 // ---------- Commande vocale ----------
 function voice() {
@@ -2746,9 +2782,9 @@ function remotePanel(d) {
 $('#else .meta').onclick = $('#else .art').onclick = () => remoteSheet($('#else').dataset.dev);
 $('#else .pp').onclick = () => { const d = rc.devices.find(x => x.id === $('#else').dataset.dev); if (d) sendCmd(d, 'pause').catch(() => { }); };
 $('#else .take').onclick = () => { const d = rc.devices.find(x => x.id === $('#else').dataset.dev); if (d) rcTakeOver(d); };
-audio.addEventListener('play', () => { rcPublish(true); rcLoop(); rcShow(); });
-audio.addEventListener('pause', () => { rcPublish(true); rcShow(); });
-audio.addEventListener('seeked', () => rcPublish(true));
+onAudio('play', () => { rcPublish(true); rcLoop(); rcShow(); });
+onAudio('pause', () => { rcPublish(true); rcShow(); });
+onAudio('seeked', () => rcPublish(true));
 setInterval(() => { if (Date.now() - rc.lastPub > 25000) rcPublish(true); if (!rc.loop) rcLoop(); }, 10000);   // présence : « je suis toujours là »
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { rcKick(); if (isBoss()) loadFamilyWishes(); } });
 setInterval(() => { if (isBoss() && document.visibilityState === 'visible') loadFamilyWishes(); }, 10 * 60000);
