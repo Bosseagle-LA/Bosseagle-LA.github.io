@@ -2,7 +2,7 @@
    Paroles : LRCLIB. Clips : YouTube (lecteur officiel intégré, ou l'appli YouTube / YouTube Music). */
 'use strict';
 
-const VERSION = '2.0.7';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
+const VERSION = '2.0.8';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
 const YT_KEY = 'AIzaSyDoAxJzDHTkIPDqZbVcLr2Aguu40kPZqio';            // clé « BossPlayPWA » (limitée à bosseagle-la.github.io)
 // Lecture de la musique + dossier caché de BossPlay (profil de chacun) + fichiers créés par BossPlay (index de la bibliothèque).
 const SCOPE = 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file';
@@ -2169,7 +2169,32 @@ async function readJson(id) {
 }
 
 // ---------- Radio (Radio Browser, flux https uniquement) ----------
-const radio = { el: new Audio(), st: null, results: [], q: '', loading: false, msg: '' };
+const radio = { el: new Audio(), st: null, results: [], q: '', loading: false, msg: '', cat: null, open: false };
+// Catégories comme sur le Mac : trois choix principaux, puis « Pays et styles » repliés.
+const RCATS = [
+  { id: 'mine', t: 'Mes radios', i: '♥' }, { id: 'recent', t: 'Récentes', i: '🕘' }, { id: 'top', t: 'Les plus écoutées', i: '🌐', p: { limit: 120 } },
+  { id: 'QC', t: 'Québec', i: '📍', p: { countrycode: 'CA', state: 'Quebec' } }, { id: 'CA', t: 'Canada', i: '📍', p: { countrycode: 'CA' } },
+  { id: 'FR', t: 'France', i: '📍', p: { countrycode: 'FR' } }, { id: 'BE', t: 'Belgique', i: '📍', p: { countrycode: 'BE' } },
+  { id: 'CH', t: 'Suisse', i: '📍', p: { countrycode: 'CH' } }, { id: 'US', t: 'États-Unis', i: '📍', p: { countrycode: 'US' } },
+  { id: 'GB', t: 'Royaume-Uni', i: '📍', p: { countrycode: 'GB' } },
+  { id: 't-rock', t: 'Rock', i: '♪', p: { tag: 'rock' } }, { id: 't-pop', t: 'Pop', i: '♪', p: { tag: 'pop' } },
+  { id: 't-jazz', t: 'Jazz', i: '♪', p: { tag: 'jazz' } }, { id: 't-classical', t: 'Classique', i: '♪', p: { tag: 'classical' } },
+  { id: 't-electronic', t: 'Électro', i: '♪', p: { tag: 'electronic' } }, { id: 't-hiphop', t: 'Hip-hop', i: '♪', p: { tag: 'hip' } },
+  { id: 't-80s', t: 'Années 80', i: '♪', p: { tag: '80s' } }, { id: 't-chill', t: 'Chill / Lounge', i: '♪', p: { tag: 'chillout' } },
+  { id: 't-blues', t: 'Blues', i: '♪', p: { tag: 'blues' } }, { id: 't-country', t: 'Country', i: '♪', p: { tag: 'country' } },
+  { id: 't-news', t: 'Info', i: '📰', p: { tag: 'news' } },
+];
+async function radioCat(c) {
+  radio.cat = c.id; radio.q = ''; store.set('radioCat', c.id);
+  if (!c.p) { radio.results = []; radio.msg = ''; render(); return; }
+  radio.loading = true; radio.msg = ''; render();
+  try {
+    const qs = new URLSearchParams(Object.assign({ hidebroken: 'true', order: 'clickcount', reverse: 'true', limit: '80' }, c.p));
+    radio.results = (await rbGet('/json/stations/search?' + qs)).filter(s => /^https:/i.test(s.url_resolved || '')).map(toStation);
+    if (!radio.results.length) radio.msg = 'Aucune radio en https trouvée.';
+  } catch (e) { radio.msg = e.message; }
+  radio.loading = false; render();
+}
 radio.el.preload = 'none';
 const RB = ['https://de1.api.radio-browser.info', 'https://nl1.api.radio-browser.info', 'https://at1.api.radio-browser.info'];
 async function rbGet(path) {
@@ -2192,6 +2217,7 @@ async function radioSearch(q) {
 function radioPlay(st) {
   audio.pause();
   radio.st = st; radio.el.src = st.url;
+  store.set('radioRecent', [st].concat(store.get('radioRecent', []).filter(r => r.id !== st.id)).slice(0, 24));
   radio.el.play().then(() => toast('📻 ' + st.name)).catch(() => toast('Cette radio ne se lit pas sur cet appareil.'));
   if ('mediaSession' in navigator) navigator.mediaSession.metadata = new MediaMetadata({ title: st.name, artist: 'Radio', album: st.tags || 'BossPlay Radio', artwork: st.favicon ? [{ src: st.favicon, sizes: '256x256' }] : [] });
   try { fetch(RB[0] + '/json/url/' + st.id).catch(() => { }); } catch { }
@@ -2219,19 +2245,39 @@ function stationRow(st) {
     h('div', { class: 'm' }, h('div', null, st.name), h('div', { class: 's' }, [st.country, st.tags].filter(Boolean).join(' · '))),
     h('button', { class: 'x', style: isFavRadio(st) ? 'color:var(--red)' : '', onclick: e => { e.stopPropagation(); favRadio(st); } }, isFavRadio(st) ? '♥' : '♡'));
 }
+function radioTile(st) {
+  const on = radio.st && radio.st.id === st.id, fav = isFavRadio(st);
+  return h('div', { class: 'rtile' + (on ? ' playing' : ''), onclick: () => radioPlay(st) },
+    h('div', { class: 'rart' }, st.favicon ? h('img', { src: st.favicon, alt: '', loading: 'lazy', onerror: e => { e.target.replaceWith(h('span', null, '📻')); } }) : h('span', null, '📻'),
+      h('button', { class: 'rheart' + (fav ? ' on' : ''), title: fav ? 'Retirer de Mes radios' : 'Ajouter à Mes radios', onclick: e => { e.stopPropagation(); favRadio(st); } }, fav ? '♥' : '♡')),
+    h('div', { class: 'n' }, st.name), h('div', { class: 'a' }, [st.country, (st.tags || '').split(',')[0]].filter(Boolean).join(' · ')));
+}
 function viewRadio(v) {
-  const q = h('input', { class: 'field', type: 'search', placeholder: 'Nom de radio, ville, style (ex. CKOI, jazz, Montréal)…', value: radio.q });
-  const go2 = () => { radio.q = q.value.trim(); radioSearch(radio.q); };
+  if (!radio.cat) radio.cat = store.get('radioCat', X.radios.length ? 'mine' : 'top');
+  const cat = RCATS.find(c => c.id === radio.cat) || RCATS[2];
+  const q = h('input', { class: 'field', type: 'search', placeholder: 'Chercher une radio (ex. CKOI, jazz, Montréal)…', value: radio.q });
+  const go2 = () => { radio.q = q.value.trim(); if (radio.q) { radio.cat = 'search'; radioSearch(radio.q); } else radioCat(cat); };
   q.addEventListener('keydown', e => { if (e.key === 'Enter') go2(); });
-  v.append(h('h1', null, 'Radio'),
-    h('div', { class: 'row', style: 'margin-bottom:12px' }, q, h('button', { class: 'btn', onclick: go2 }, 'Chercher')),
-    h('p', { class: 'muted small' }, 'Pendant l\'écoute, « ♥ Retenir ce titre » garde la chanson dans tes envies' + (isBoss() ? '.' : ' et la transmet à Boss.') + ' Astuce : lance Shazam depuis le Centre de contrôle pour connaître le titre.'));
-  if (X.radios.length) v.append(h('h2', null, 'Mes radios'), h('div', { class: 'list' }, X.radios.map(stationRow)));
-  v.append(h('h2', null, radio.q ? 'Résultats' : 'Populaires au Canada'));
-  if (radio.loading) v.append(h('p', { class: 'muted' }, 'Recherche…'));
+  const chip = c => h('button', { class: 'rchip' + (!radio.q && radio.cat === c.id ? ' on' : ''), onclick: () => { radio.open = radio.open && RCATS.indexOf(c) >= 3; radioCat(c); } },
+    h('span', { class: 'ri' }, c.i), c.t);
+  const hiddenSel = !radio.q && RCATS.indexOf(cat) >= 3;
+  let list, sub;
+  if (radio.q) { list = radio.results; sub = list.length + ' radio' + (list.length > 1 ? 's' : '') + ' pour « ' + radio.q + ' »'; }
+  else if (cat.id === 'mine') { list = X.radios; sub = list.length + ' radio' + (list.length > 1 ? 's' : '') + ' favorite' + (list.length > 1 ? 's' : ''); }
+  else if (cat.id === 'recent') { list = store.get('radioRecent', []); sub = list.length + ' radio' + (list.length > 1 ? 's' : '') + ' écoutée' + (list.length > 1 ? 's' : '') + ' récemment'; }
+  else { list = radio.results; sub = cat.t + ' · ' + list.length + ' radio' + (list.length > 1 ? 's' : '') + ' · annuaire radio-browser.info'; }
+  v.append(h('h1', null, 'Radios'), h('p', { class: 'muted small', style: 'margin:-6px 0 12px' }, sub),
+    h('div', { class: 'row', style: 'margin-bottom:12px' }, q),
+    h('div', { class: 'rchips' }, RCATS.slice(0, 3).map(chip),
+      h('button', { class: 'rchip' + (hiddenSel ? ' on' : ''), onclick: () => { radio.open = !radio.open; render(); } },
+        hiddenSel ? cat.t : 'Pays et styles', h('span', { class: 'ri' }, radio.open ? '▴' : '▾'))),
+    radio.open ? h('div', { class: 'rchips more' }, RCATS.slice(3).map(chip)) : null);
+  if (radio.loading) v.append(h('p', { class: 'muted' }, 'Recherche des radios…'));
   else if (radio.msg) v.append(h('p', { class: 'muted' }, radio.msg));
-  else v.append(h('div', { class: 'list' }, radio.results.map(stationRow)));
-  if (!radio.results.length && !radio.loading && !radio.msg) radioSearch('');
+  else if (!list.length) v.append(h('p', { class: 'muted' }, cat.id === 'mine' && !radio.q ? 'Aucune radio dans « Mes radios ». Touche le cœur d\'une radio pour l\'ajouter.' : cat.id === 'recent' ? 'Aucune radio écoutée pour l\'instant.' : 'Aucune radio trouvée.'));
+  else v.append(h('div', { class: 'rgrid' }, list.map(radioTile)));
+  v.append(h('p', { class: 'muted small', style: 'margin-top:16px' }, 'Pendant l\'écoute, « ♥ Retenir ce titre » garde la chanson dans tes envies' + (isBoss() ? '.' : ' et la transmet à Boss.')));
+  if (!radio.q && cat.p && !radio.results.length && !radio.loading && !radio.msg) radioCat(cat);
 }
 
 // ---------- Envies (« Retenir ce titre ») ----------
