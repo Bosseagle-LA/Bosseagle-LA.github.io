@@ -2,7 +2,7 @@
    Paroles : LRCLIB. Clips : YouTube (lecteur officiel intégré, ou l'appli YouTube / YouTube Music). */
 'use strict';
 
-const VERSION = '2.0.8';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
+const VERSION = '2.0.9';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
 const YT_KEY = 'AIzaSyDoAxJzDHTkIPDqZbVcLr2Aguu40kPZqio';            // clé « BossPlayPWA » (limitée à bosseagle-la.github.io)
 // Lecture de la musique + dossier caché de BossPlay (profil de chacun) + fichiers créés par BossPlay (index de la bibliothèque).
 const SCOPE = 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file';
@@ -870,13 +870,44 @@ function parseName(file) {
 let goneTracks = null;
 const goneKey = p => String(p).split('/').map(fold).slice(-3).join('/');
 function goneSet() { if (!goneTracks) goneTracks = new Set(store.get('goneTracks', [])); return goneTracks; }
+// Corrections de titres faites sur la S8 / tablette (« BossPlay-corrections.json » à la racine du dossier de musique) :
+// sans elles, un fichier « Track 1.mp3 » s'affiche « Track 1 » et les paroles ne se trouvent pas.
+// Le chemin des titres (pathOf, utilisé pour la synchro) ne change jamais : seuls l'affichage et la recherche changent.
+const CORR_FILE = 'BossPlay-corrections.json';
+let corr = store.get('corrections', null);
+function corrIndex(o) {
+  const t = {}, a = {};
+  if (o && o.tracks) for (const k in o.tracks) { const x = o.tracks[k] || {}; t[String(k).split('/').filter(Boolean).slice(-3).map(fold).join('/')] = x; }
+  if (o && o.albums) for (const k in o.albums) { const x = o.albums[k] || {}; const p = String(k).split('\u0001'); if (p.length === 2 && x.name) a[fold(p[0].split('/').pop()) + '/' + fold(p[1])] = x.name; }
+  return { t, a };
+}
+let corrIdx = corrIndex(corr);
+async function loadCorrections() {
+  if (!hasToken() || !S.rootId) return;
+  try {
+    const j = await drive('files', { q: `'${S.rootId}' in parents and name='${CORR_FILE}' and trashed=false`, fields: 'files(id,modifiedTime)', orderBy: 'modifiedTime desc', pageSize: 3, supportsAllDrives: true, includeItemsFromAllDrives: true });
+    const fid = j.files?.[0]?.id; if (!fid) return;
+    const r = await gfetch('https://www.googleapis.com/drive/v3/files/' + fid + '?alt=media'); if (!r.ok) return;
+    const o = await r.json();
+    if (JSON.stringify(o) === JSON.stringify(corr)) return;
+    corr = o; store.set('corrections', o); corrIdx = corrIndex(o);
+    const raw = await idb.get('library');
+    if (raw && raw.rootId === S.rootId) { buildLib(raw); render(); }
+  } catch { }
+}
+
 function buildLib(raw) {
   const albums = new Map(), artists = new Map();
   const gone = goneSet();
   const tracks = raw.tracks.filter(t => !gone.size || !gone.has(goneKey(pathOf(t)))).map(t => Object.assign({}, t));
   for (const t of tracks) {
+    const c = corrIdx.t[pathOf(t).split('/').map(fold).join('/')];
+    if (c) { if (c.title) t.title = c.title; if (c.artist) t.artist = c.artist; if (c.trackNo) t.no = +c.trackNo || t.no; }
+    const an = corrIdx.a[fold(t.albumArtist || t.artist) + '/' + fold(t.album)]; if (an) t.albumLabel = an;
+  }
+  for (const t of tracks) {
     let a = albums.get(t.albumId);
-    if (!a) { const aa = t.albumArtist || t.artist; a = { id: t.albumId, name: t.album, artist: aa, artistKey: fold(aa), tracks: [], cover: raw.covers[t.albumId] || null }; albums.set(a.id, a); }
+    if (!a) { const aa = t.albumArtist || t.artist; a = { id: t.albumId, name: corrIdx.a[fold(aa) + '/' + fold(t.album)] || t.album, artist: aa, artistKey: fold(aa), tracks: [], cover: raw.covers[t.albumId] || null }; albums.set(a.id, a); }
     a.tracks.push(t);
   }
   for (const a of albums.values()) {
@@ -951,6 +982,7 @@ async function scan(full = false) {
     await idb.set('library', raw);
     buildLib(raw);
     if (sync.admin) publishIndex(raw, true);
+    loadCorrections();
     setStatus(`${lib.tracks.length} titres · ${lib.albums.length} albums · ${lib.artists.length} artistes`);
     render();
   } catch (e) {
@@ -1138,7 +1170,7 @@ onAudio('error', () => { if (audio.src) { P.error = 'Lecture impossible de ce fo
 function setSession(t) {
   if (!('mediaSession' in navigator)) return;
   const a = lib.albumById.get(t.albumId);
-  const md = { title: t.title, artist: t.artist, album: t.album, artwork: [] };
+  const md = { title: t.title, artist: t.artist, album: t.albumLabel || t.album, artwork: [] };
   navigator.mediaSession.metadata = new MediaMetadata(md);
   const key = a ? (a.cover ? 'img:' + a.cover : 'emb:' + a.tracks[0].id) : null;
   if (key) loadCover(key).then(u => { if (u && cur() === t) navigator.mediaSession.metadata = new MediaMetadata(Object.assign(md, { artwork: [{ src: u, sizes: '600x600', type: 'image/jpeg' }] })); });
@@ -1231,7 +1263,7 @@ function trackRow(t, list, i, opts = {}) {
   const no = opts.num ? (t.no || i + 1) : i + 1;
   return h('div', { class: 'tr' + (playing ? ' playing' : ''), 'data-track': t.id, onclick: () => play(list, i) },
     h('div', { class: 'no', 'data-no': no }, playing ? h('span', { class: 'eq' }, '▮▮') : no),
-    h('div', { class: 'm' }, h('div', null, t.title), h('div', { class: 's' }, opts.album ? t.artist + ' — ' + t.album : t.artist)),
+    h('div', { class: 'm' }, h('div', null, t.title), h('div', { class: 's' }, opts.album ? t.artist + ' — ' + (t.albumLabel || t.album) : t.artist)),
     favs.tracks.has(t.id) ? h('span', { style: 'color:var(--red)' }, '♥') : null,
     h('button', { class: 'fl' + (nowBest[t.id] ? ' on' : ''), title: nowBest[t.id] ? 'Retirer de Now Best' : 'Mettre en Now Best', html: FLAME(!!nowBest[t.id]),
       onclick: e => { e.stopPropagation(); toggleBest(t.id); bestRefresh(t.id); } }),
@@ -1603,12 +1635,12 @@ function updatePlayer() {
   const t = cur(); $('#mini').hidden = !t;
   if (!t) { $('#full').hidden = true; return; }
   $('#mini .t').textContent = t.title;
-  $('#mini .s').textContent = P.error || (ui.loading ? 'Chargement…' : t.artist + ' — ' + t.album);
+  $('#mini .s').textContent = P.error || (ui.loading ? 'Chargement…' : t.artist + ' — ' + (t.albumLabel || t.album));
   const playing = !audio.paused;
   setPP($('#mini .play'), playing); setPP($('#full .play'), playing);
   $('#full .title').textContent = t.title;
   $('#full .artist').textContent = t.artist;
-  $('#full .album').textContent = t.album;
+  $('#full .album').textContent = t.albumLabel || t.album;
   $('#full .err').textContent = P.error;
   $('#full .shuffle').classList.toggle('on', P.shuffle);
   $('#full .repeat').classList.toggle('on', P.repeat > 0);
@@ -2858,6 +2890,7 @@ function extrasSettings() {
   if (!navigator.onLine && (offline.size || localTracks.length)) ui.tab = 'kept';   // sans Internet : directement la musique téléchargée
   render(); banner();
   if (S.clientId) initAuth();
+  setTimeout(loadCorrections, 4000);
   // Activation commencée puis appli quittée pour la page Google : on la termine au retour (15 minutes au plus).
   try {
     const pend = JSON.parse(localStorage.getItem('bp.autoPending') || 'null');
