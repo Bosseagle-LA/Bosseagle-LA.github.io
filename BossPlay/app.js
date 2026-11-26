@@ -2,7 +2,7 @@
    Paroles : LRCLIB. Clips : YouTube (lecteur officiel intégré, ou l'appli YouTube / YouTube Music). */
 'use strict';
 
-const VERSION = '2.0.9';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
+const VERSION = '2.0.10';   // même numéro que le cache dans sw.js (bp-app-…) : les deux se changent ensemble
 const YT_KEY = 'AIzaSyDoAxJzDHTkIPDqZbVcLr2Aguu40kPZqio';            // clé « BossPlayPWA » (limitée à bosseagle-la.github.io)
 // Lecture de la musique + dossier caché de BossPlay (profil de chacun) + fichiers créés par BossPlay (index de la bibliothèque).
 const SCOPE = 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file';
@@ -1701,8 +1701,10 @@ function parseLrc(s) {
 }
 const cleanTitle = t => t.replace(/\s*[([][^)\]]*[)\]]/g, '').replace(/\s+(feat\.?|ft\.?|featuring)\s+.*$/i, '').trim() || t;
 async function lyricsFor(t) {
-  if (lyrMem.has(t.id)) return lyrMem.get(t.id);
-  let r = await idb.get('lyr:' + t.id);
+  // Clé avec le titre : une correction de titre (BossPlay-corrections.json) relance la recherche.
+  const lk = 'lyr:' + t.id + '|' + t.title + '|' + t.artist;
+  if (lyrMem.has(lk)) return lyrMem.get(lk);
+  let r = await idb.get(lk);
   if (!r || (r.none && Date.now() - r.date > 86400000)) {
     const title = cleanTitle(t.title), artist = /various|divers|fichiers/i.test(t.artist) ? '' : t.artist;
     const secs = Math.round(audio.duration || 0);
@@ -1718,11 +1720,11 @@ async function lyricsFor(t) {
         found = arr.find(o => o.syncedLyrics && (!secs || Math.abs(o.duration - secs) < 10)) || arr.find(o => !secs || Math.abs(o.duration - secs) < 10) || arr[0] || null;
       }
       r = found ? { synced: found.syncedLyrics || '', plain: found.plainLyrics || '', instr: !!found.instrumental } : { none: true, date: Date.now() };
-      await idb.set('lyr:' + t.id, r);
+      await idb.set(lk, r);
     } catch { r = null; }
   }
   const out = r && !r.none ? { lines: parseLrc(r.synced), plain: r.plain, instr: r.instr } : null;
-  lyrMem.set(t.id, out);
+  lyrMem.set(lk, out);
   return out;
 }
 async function showLyrics() {
